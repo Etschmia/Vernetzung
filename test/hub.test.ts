@@ -138,6 +138,27 @@ test('Long-Poll wird durch eine eintreffende Nachricht geweckt', async () => {
   assert.ok(Date.now() - started < 5000);
 });
 
+test('Angemeldeter Abfrage-Rhythmus erscheint als polling mit nächster Abfrage', async () => {
+  const a = await join('alpha', 'paul');
+  const b = await join('alpha', 'quirin');
+  assert.equal((await call('GET', '/inbox?wait=0&every=5', b)).json.error.code, 'field_invalid');
+  assert.equal((await call('GET', '/inbox?wait=0&every=300', b)).status, 200);
+  const seen = (await call('GET', '/agents', a)).json.agents.find((x: any) => x.name === 'quirin');
+  assert.equal(seen.presence, 'polling');
+  assert.equal(seen.poll_interval, 300);
+  assert.ok(Date.parse(seen.next_poll_at) > Date.now() + 290_000);
+  const sent = await call('POST', '/messages', a, { to: ['quirin'], body: 'x' });
+  assert.equal(sent.json.recipients[0].presence, 'polling');
+  assert.equal(sent.json.recipients[0].next_poll_at, seen.next_poll_at);
+  // Überfällig: letzte Abfrage liegt mehr als zwei Intervalle zurück.
+  hub.core.run("UPDATE agents SET last_poll = last_poll - 700000, last_seen = last_seen - 700000 WHERE name = 'quirin'");
+  assert.equal((await call('GET', '/agents', a)).json.agents.find((x: any) => x.name === 'quirin').presence, 'recent');
+  // Ein Long-Poll hebt den Rhythmus auf.
+  await call('GET', '/inbox?wait=1', b);
+  const after = (await call('GET', '/agents', a)).json.agents.find((x: any) => x.name === 'quirin');
+  assert.equal(after.poll_interval, undefined);
+});
+
 test('Räume sind voneinander getrennt', async () => {
   const a = await join('alpha', 'emil');
   const x = await join('beta', 'xaver');

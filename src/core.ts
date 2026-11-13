@@ -20,7 +20,7 @@ export type Room = {
 export type Agent = {
   id: string; room_id: number; name: string; owner: string; description: string;
   agent_type: string; token_hash: string; status: string; created_at: number;
-  last_seen: number | null; last_poll: number | null;
+  last_seen: number | null; last_poll: number | null; poll_interval: number | null;
   session_id: string | null; session_seen: number | null;
 };
 
@@ -67,6 +67,7 @@ export const safeEqual = (a: string, b: string) =>
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS admin_sessions (sid_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS rooms (
   id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
   auth_level TEXT NOT NULL DEFAULT 'invite', password_hash TEXT, created_at INTEGER NOT NULL);
@@ -103,6 +104,9 @@ export function createCore(cfg: Config) {
   const db = new DatabaseSync(cfg.dbPath);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  // Nachträglich hinzugekommene Spalten für bestehende Datenbanken.
+  const columns = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name);
+  if (!columns.includes('poll_interval')) db.exec('ALTER TABLE agents ADD COLUMN poll_interval INTEGER');
 
   const cache = new Map<string, ReturnType<DatabaseSync['prepare']>>();
   const stmt = (sql: string) => {
@@ -132,9 +136,14 @@ export function createCore(cfg: Config) {
     for (const done of [...(waiters.get(agentId) ?? [])]) done(reason);
   };
 
-  const presence = (a: Pick<Agent, 'id' | 'last_seen' | 'last_poll'>): string => {
+  // listening: wartet gerade oder fragt in dichter Folge ab. polling: fragt nach angemeldetem
+  // Rhythmus ab und ist nicht überfällig (doppeltes Intervall plus 30 Sekunden Spielraum).
+  const presence = (a: Pick<Agent, 'id' | 'last_seen' | 'last_poll' | 'poll_interval'>): string => {
     const now = Date.now();
-    if (waiters.get(a.id)?.size || (a.last_poll != null && now - a.last_poll < LISTENING_MS)) return 'listening';
+    if (waiters.get(a.id)?.size) return 'listening';
+    if (a.poll_interval && a.last_poll != null) {
+      if (now - a.last_poll < a.poll_interval * 2000 + 30_000) return 'polling';
+    } else if (a.last_poll != null && now - a.last_poll < LISTENING_MS) return 'listening';
     if (a.last_seen != null && now - a.last_seen < RECENT_MS) return 'recent';
     return 'offline';
   };

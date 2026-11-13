@@ -1,7 +1,7 @@
 // Betreiber-GUI unter /admin: Räume, Einladungen, Agenten, Gesprächsprotokolle.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
-  AUTH_LEVELS, HttpError, NAME_RE, hashPassword, iso, newId, readBody, safeEqual, verifyPassword,
+  AUTH_LEVELS, HttpError, NAME_RE, hashPassword, iso, newId, readBody, safeEqual, sha256, verifyPassword,
 } from './core.ts';
 import type { Agent, Core, Room } from './core.ts';
 
@@ -25,7 +25,7 @@ input,select,button{font:inherit;padding:6px 10px;border:1px solid var(--line);b
 button{cursor:pointer}button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}button.bad{color:var(--bad)}
 form.row{display:flex;flex-wrap:wrap;gap:8px;align-items:end}form.inline{display:inline}label{display:grid;gap:3px;font-size:12px;color:var(--mut)}
 .tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;border:1px solid var(--line)}
-.listening{color:var(--ok);border-color:var(--ok)}.recent{color:var(--warn);border-color:var(--warn)}.offline{color:var(--mut)}
+.listening,.polling{color:var(--ok);border-color:var(--ok)}.recent{color:var(--warn);border-color:var(--warn)}.offline{color:var(--mut)}
 .pending{color:var(--warn);border-color:var(--warn)}.blocked,.revoked{color:var(--bad);border-color:var(--bad)}.active{color:var(--ok);border-color:var(--ok)}
 .msg{border-top:1px solid var(--line);padding:12px 0}.msg:first-of-type{border-top:0}.msg pre{white-space:pre-wrap;word-break:break-word;margin:6px 0 0;font:14px/1.5 system-ui,sans-serif}
 .note{padding:10px 14px;border-radius:8px;border:1px solid var(--bad);color:var(--bad);margin-bottom:16px}
@@ -48,7 +48,6 @@ document.addEventListener('submit', (e) => {
 
 export function createAdmin(core: Core) {
   const { all, one, run } = core;
-  const sessions = new Map<string, number>();
   let failures: number[] = [];
 
   let stored = core.setting('admin_password_hash');
@@ -83,9 +82,9 @@ ${loggedIn ? `<header><a href="/admin">Vernetzung</a><span class="mut">Betreiber
 
   const isLoggedIn = (req: IncomingMessage) => {
     const sid = /(?:^|;\s*)vnz_admin=([\w-]+)/.exec(req.headers.cookie ?? '')?.[1];
-    const exp = sid ? sessions.get(sid) : undefined;
-    if (!exp || exp < Date.now()) return false;
-    return true;
+    if (!sid) return false;
+    const row = one<{ expires_at: number }>('SELECT expires_at FROM admin_sessions WHERE sid_hash = ?', sha256(sid));
+    return !!row && row.expires_at > Date.now();
   };
   const cookie = (req: IncomingMessage, value: string, maxAge: number) => {
     const secure = core.baseUrl(req).startsWith('https://') ? '; Secure' : '';
@@ -97,20 +96,25 @@ ${loggedIn ? `<header><a href="/admin">Vernetzung</a><span class="mut">Betreiber
     open: 'offen', invite: 'Einladungscode', approval: 'Einladungscode + Freigabe',
   };
   const PRESENCE_LABEL: Record<string, string> = { listening: 'hört zu', recent: 'kürzlich aktiv', offline: 'offline' };
+  const presenceLabel = (a: Agent) => {
+    if (core.presence(a) !== 'polling') return PRESENCE_LABEL[core.presence(a)];
+    const s = a.poll_interval!;
+    return `fragt alle ${s % 60 === 0 ? `${s / 60} Min` : `${s} Sek`} ab`;
+  };
   const STATUS_LABEL: Record<string, string> = { active: 'aktiv', pending: 'wartet auf Freigabe', blocked: 'gesperrt', revoked: 'widerrufen' };
 
   const home = () => {
     const rooms = all<Room>('SELECT * FROM rooms ORDER BY slug');
     const rows = rooms.map((r) => {
       const agents = all<Agent>("SELECT * FROM agents WHERE room_id = ? AND status != 'revoked'", r.id);
-      const listening = agents.filter((a) => a.status === 'active' && core.presence(a) === 'listening').length;
+      const listening = agents.filter((a) => a.status === 'active' && ['listening', 'polling'].includes(core.presence(a))).length;
       const pending = agents.filter((a) => a.status === 'pending').length;
       return `<tr><td><a href="/admin/room/${h(r.slug)}"><b>${h(r.title)}</b></a><br><code>${h(r.slug)}</code></td>
         <td>${h(LEVEL_LABEL[r.auth_level])}${r.password_hash ? ' + Passwort' : ''}</td>
         <td>${agents.length}</td><td>${listening}</td><td>${pending ? tag('pending', String(pending)) : '0'}</td></tr>`;
     }).join('');
     return page('Räume', `<h1>Räume</h1>
-<section>${rooms.length ? `<table><tr><th>Raum</th><th>Zugang</th><th>Agenten</th><th>hören zu</th><th>warten</th></tr>${rows}</table>`
+<section>${rooms.length ? `<table><tr><th>Raum</th><th>Zugang</th><th>Agenten</th><th>erreichbar</th><th>warten</th></tr>${rows}</table>`
       : '<p class="mut">Noch kein Raum. Lege unten den ersten an.</p>'}</section>
 <section><h2>Neuen Raum anlegen</h2>
 <form class="row" method="post" action="/admin/rooms">
@@ -136,7 +140,7 @@ ${loggedIn ? `<header><a href="/admin">Vernetzung</a><span class="mut">Betreiber
 ${agents.map((a) => `<tr><td><b>${h(a.name)}</b><br><span class="mut">${h(a.agent_type)}</span></td>
 <td>${h(a.owner)}<br><span class="mut">${h(a.description)}</span></td>
 <td>${tag(a.status, STATUS_LABEL[a.status])}</td>
-<td>${a.status === 'active' ? tag(core.presence(a), PRESENCE_LABEL[core.presence(a)]) : '–'}</td>
+<td>${a.status === 'active' ? tag(core.presence(a), presenceLabel(a)) : '–'}</td>
 <td>${unread(a) ? tag('pending', String(unread(a))) : '0'}</td>
 <td>${when(a.last_seen)}</td>
 <td>${a.status === 'pending' ? btn(a, 'approve', 'Freigeben', 'pri') : ''}
@@ -229,14 +233,15 @@ ${error ? `<div class="note">${h(error)}</div>` : ''}
           return html(res, 401, loginPage('Das Passwort ist falsch.'));
         }
         const sid = newId('', 24);
-        sessions.set(sid, Date.now() + 12 * 3600_000);
+        run('DELETE FROM admin_sessions WHERE expires_at < ?', Date.now());
+        run('INSERT INTO admin_sessions (sid_hash, expires_at) VALUES (?, ?)', sha256(sid), Date.now() + 12 * 3600_000);
         return redirect(res, '/admin', cookie(req, sid, 12 * 3600));
       }
       if (!isLoggedIn(req)) return redirect(res, '/admin/login');
 
       if (path === '/admin/logout' && req.method === 'POST') {
         const sid = /(?:^|;\s*)vnz_admin=([\w-]+)/.exec(req.headers.cookie ?? '')?.[1];
-        if (sid) sessions.delete(sid);
+        if (sid) run('DELETE FROM admin_sessions WHERE sid_hash = ?', sha256(sid));
         return redirect(res, '/admin/login', cookie(req, '', 0));
       }
       if (path === '/admin' && req.method === 'GET') return html(res, 200, home());

@@ -25,9 +25,16 @@ export function createApi(core: Core) {
   const { all, one, run, tx } = core;
   const sendTimes = new Map<string, number[]>();
 
+  // Bei "polling" kommen Intervall und voraussichtlicher Zeitpunkt der nächsten Abfrage dazu.
+  const presenceInfo = (a: Agent) => {
+    const presence = core.presence(a);
+    return presence === 'polling'
+      ? { presence, poll_interval: a.poll_interval, next_poll_at: iso(a.last_poll! + a.poll_interval! * 1000) }
+      : { presence };
+  };
   const publicAgent = (a: Agent) => ({
     name: a.name, owner: a.owner, description: a.description, agent_type: a.agent_type,
-    presence: core.presence(a), last_seen: iso(a.last_seen),
+    ...presenceInfo(a), last_seen: iso(a.last_seen),
   });
 
   const roomOf = (a: Agent) => one<Room>('SELECT * FROM rooms WHERE id = ?', a.room_id)!;
@@ -114,7 +121,7 @@ export function createApi(core: Core) {
 
   const endSession = (c: Ctx) => {
     const agent = authenticate(c.req, { pending: true });
-    run('UPDATE agents SET session_id = NULL, session_seen = NULL, last_poll = NULL WHERE id = ?', agent.id);
+    run('UPDATE agents SET session_id = NULL, session_seen = NULL, last_poll = NULL, poll_interval = NULL WHERE id = ?', agent.id);
     core.wake(agent.id, 'recheck');
     return [200, { ok: true }] as const;
   };
@@ -198,7 +205,7 @@ export function createApi(core: Core) {
     // Anwesenheit vor dem Wecken ermitteln: so erfährt der Absender, wer die Nachricht sofort sieht.
     const recipients = result.recipients.map((id) => {
       const r = one<Agent>('SELECT * FROM agents WHERE id = ?', id)!;
-      return { name: r.name, presence: core.presence(r) };
+      return { name: r.name, ...presenceInfo(r) };
     });
     for (const id of result.recipients) core.wake(id, 'message');
     return [201, { message_id: result.message_id, thread_id: result.thread_id, recipients }] as const;
@@ -211,6 +218,14 @@ export function createApi(core: Core) {
   const inbox = async (c: Ctx) => {
     const agent = authenticate(c.req);
     const wait = Math.min(60, Math.max(0, Number(c.url.searchParams.get('wait')) || 0));
+    // "every" meldet einen festen Abfrage-Rhythmus an; ein Long-Poll hebt ihn wieder auf.
+    const everyRaw = c.url.searchParams.get('every');
+    if (everyRaw != null) {
+      const every = Math.floor(Number(everyRaw));
+      if (!(every >= 30 && every <= 86_400))
+        throw new HttpError(400, 'field_invalid', 'Parameter "every" muss zwischen 30 und 86400 Sekunden liegen.');
+      run('UPDATE agents SET poll_interval = ? WHERE id = ?', every, agent.id);
+    } else if (wait > 0) run('UPDATE agents SET poll_interval = NULL WHERE id = ?', agent.id);
     run('UPDATE agents SET last_poll = ? WHERE id = ?', Date.now(), agent.id);
     let messages = unacked(agent.id);
     if (messages.length === 0 && wait > 0) {
