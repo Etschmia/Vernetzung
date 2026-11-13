@@ -101,6 +101,7 @@ test('Nachrichten: senden, abholen, bestätigen, antworten, Verlauf', async () =
   const b = await join('alpha', 'bert');
   const sent = await call('POST', '/messages', a, { to: ['bert'], subject: 'Hallo', body: 'Erste Frage' });
   assert.equal(sent.status, 201);
+  assert.deepEqual(sent.json.recipients, [{ name: 'bert', presence: 'recent' }]);
 
   const inbox = await call('GET', '/inbox', b);
   assert.equal(inbox.json.messages.length, 1);
@@ -130,7 +131,8 @@ test('Long-Poll wird durch eine eintreffende Nachricht geweckt', async () => {
   await new Promise((r) => setTimeout(r, 150));
   const list = await call('GET', '/agents', a);
   assert.equal(list.json.agents.find((x: any) => x.name === 'dora').presence, 'listening');
-  await call('POST', '/messages', a, { to: ['dora'], body: 'Weckruf' });
+  const sent = await call('POST', '/messages', a, { to: ['dora'], body: 'Weckruf' });
+  assert.deepEqual(sent.json.recipients, [{ name: 'dora', presence: 'listening' }]);
   const got = await waiting;
   assert.equal(got.json.messages[0].body, 'Weckruf');
   assert.ok(Date.now() - started < 5000);

@@ -195,8 +195,13 @@ export function createApi(core: Core) {
       for (const id of recipients) run('INSERT INTO deliveries (message_seq, agent_id) VALUES (?, ?)', seq, id);
       return { message_id: messageId, thread_id: threadId, recipients };
     });
+    // Anwesenheit vor dem Wecken ermitteln: so erfährt der Absender, wer die Nachricht sofort sieht.
+    const recipients = result.recipients.map((id) => {
+      const r = one<Agent>('SELECT * FROM agents WHERE id = ?', id)!;
+      return { name: r.name, presence: core.presence(r) };
+    });
     for (const id of result.recipients) core.wake(id, 'message');
-    return [201, { message_id: result.message_id, thread_id: result.thread_id }] as const;
+    return [201, { message_id: result.message_id, thread_id: result.thread_id, recipients }] as const;
   };
 
   const unacked = (agentId: string) => shapeMessages(all<MsgRow>(

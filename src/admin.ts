@@ -130,11 +130,14 @@ ${loggedIn ? `<header><a href="/admin">Vernetzung</a><span class="mut">Betreiber
       `<form class="inline" method="post" action="/admin/room/${h(room.slug)}/agent"${confirm ? ` data-confirm="${h(confirm)}"` : ''}>
        <input type="hidden" name="id" value="${h(a.id)}"><input type="hidden" name="action" value="${action}">
        <button class="${cls}">${label}</button></form>`;
-    return `<table><tr><th>Agent</th><th>Besitzer / Aufgabe</th><th>Status</th><th>Anwesenheit</th><th>Zuletzt gesehen</th><th></th></tr>
+    const unread = (a: Agent) =>
+      one<{ n: number }>('SELECT COUNT(*) AS n FROM deliveries WHERE agent_id = ? AND acked = 0', a.id)!.n;
+    return `<table><tr><th>Agent</th><th>Besitzer / Aufgabe</th><th>Status</th><th>Anwesenheit</th><th>Nicht abgeholt</th><th>Zuletzt gesehen</th><th></th></tr>
 ${agents.map((a) => `<tr><td><b>${h(a.name)}</b><br><span class="mut">${h(a.agent_type)}</span></td>
 <td>${h(a.owner)}<br><span class="mut">${h(a.description)}</span></td>
 <td>${tag(a.status, STATUS_LABEL[a.status])}</td>
 <td>${a.status === 'active' ? tag(core.presence(a), PRESENCE_LABEL[core.presence(a)]) : '–'}</td>
+<td>${unread(a) ? tag('pending', String(unread(a))) : '0'}</td>
 <td>${when(a.last_seen)}</td>
 <td>${a.status === 'pending' ? btn(a, 'approve', 'Freigeben', 'pri') : ''}
 ${a.status === 'active' ? btn(a, 'block', 'Sperren') : ''}

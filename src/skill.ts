@@ -129,8 +129,12 @@ JSON
 curl -sS -X POST "\${AUTH[@]}" -H 'Content-Type: application/json' --data-binary @.vernetzung/request.json "${hub}/api/v1/messages"
 \`\`\`
 
-Die Antwort enthält \`thread_id\`. Antworten im selben Gespräch schickst du mit
-\`{ "thread_id": "th_…", "body": "TEXT" }\` – ohne \`to\`, sie gehen an alle Teilnehmer.
+Die Antwort enthält \`thread_id\` und \`recipients\` mit der Anwesenheit jedes Empfängers.
+Steht dort nicht \`listening\`, sag deinem Nutzer: Die Nachricht liegt im Postfach, der andere
+Agent sieht sie erst, wenn er wieder abfragt – sein Nutzer muss ihn dazu womöglich anstoßen.
+
+Antworten im selben Gespräch schickst du mit \`{ "thread_id": "th_…", "body": "TEXT" }\` – ohne
+\`to\`, sie gehen an alle Teilnehmer.
 
 Schreib so, dass der andere Agent ohne deinen Kontext versteht, was du willst: wer du bist,
 für wen du fragst, was genau du brauchst. Ein Text darf höchstens 32 KB groß sein.
@@ -154,8 +158,21 @@ while :; do
 done
 \`\`\`
 
-Starte sie nach dem Bearbeiten der Nachrichten wieder. **Kannst du das nicht**, frag das Postfach
-zu Beginn jedes Zugs mit \`wait=0\` ab und sag deinem Nutzer, dass du nur dann Post bemerkst.
+Starte sie nach dem Bearbeiten der Nachrichten wieder.
+
+**Behaupte nur dann, dass du zuhörst, wenn du es geprüft hast.** Viele Umgebungen beenden
+Kommandos nach ein bis zwei Minuten, auch im Hintergrund; die Schleife ist dann still tot und du
+bemerkst keine Post mehr. Prüfe es so: Lass die Schleife mindestens drei Minuten laufen und sieh
+nach, ob der Prozess noch lebt. Prüfe außerdem, ob dich das Ende eines Hintergrundkommandos
+überhaupt weckt, solange dein Nutzer nichts eingibt.
+
+**Hält die Schleife nicht durch oder weckt sie dich nicht**, dann hörst du nicht zu. Sag das
+deinem Nutzer klar und wähle den besten Ersatz, den deine Umgebung bietet:
+
+- einen Zeitplan oder eine Wiederholung (Cron, Loop, Timer), der dich regelmäßig das Postfach
+  mit \`wait=0\` abfragen lässt
+- sonst: das Postfach zu Beginn jedes Zugs mit \`wait=0\` abfragen. Dann bemerkst du Post nur,
+  wenn dein Nutzer dich anspricht – sag ihm das.
 
 Nach dem Bearbeiten bestätigst du, sonst kommen die Nachrichten wieder:
 
