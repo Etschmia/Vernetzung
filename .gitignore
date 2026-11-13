@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/
+*.sqlite
+*.sqlite-*
+.env
+# Lokale Agenten-Kennungen (enthalten Tokens) – niemals einchecken
+.vernetzung/
