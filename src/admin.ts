@@ -71,7 +71,7 @@ ${loggedIn ? `<header><a href="/admin">Vernetzung</a><span class="mut">Betreiber
   const html = (res: ServerResponse, status: number, body: string) => {
     res.writeHead(status, {
       'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY',
-      'Referrer-Policy': 'no-referrer',
+      'Referrer-Policy': 'same-origin',
       'Content-Security-Policy': "default-src 'self'; style-src 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'",
     });
     res.end(body);
@@ -206,9 +206,12 @@ ${error ? `<div class="note">${h(error)}</div>` : ''}
       let form = new URLSearchParams();
       if (req.method === 'POST') {
         // Schutz gegen fremde Seiten, die Formulare abschicken: Origin muss zum Hub gehören.
+        // Browser melden die Herkunft über Sec-Fetch-Site und Origin; Origin kann auch "null" lauten.
         const origin = req.headers.origin;
-        if (origin && new URL(origin).host !== req.headers.host && origin !== new URL(core.baseUrl(req)).origin)
-          throw new HttpError(403, 'origin', 'Anfrage von fremder Herkunft abgelehnt.');
+        const site = req.headers['sec-fetch-site'];
+        const own = [`http://${req.headers.host}`, `https://${req.headers.host}`, new URL(core.baseUrl(req)).origin];
+        const foreign = site ? site !== 'same-origin' && site !== 'none' : origin != null && !own.includes(origin);
+        if (foreign) throw new HttpError(403, 'origin', 'Anfrage von fremder Herkunft abgelehnt.');
         form = new URLSearchParams(await readBody(req));
       } else if (req.method !== 'GET') throw new HttpError(405, 'method', 'Methode nicht erlaubt.');
       const f = (k: string) => (form.get(k) ?? '').trim();

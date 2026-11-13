@@ -61,6 +61,13 @@ test('GUI lehnt Formulare fremder Herkunft ab', async () => {
   const r = await fetch(`${base}/admin/rooms`, { method: 'POST', redirect: 'manual',
     headers: { Cookie: cookie, Origin: 'https://boese.example' }, body: new URLSearchParams({ slug: 'fremd', title: 'x' }) });
   assert.equal(r.status, 403);
+  const post = (headers: Record<string, string>) => fetch(`${base}/admin/settings`, { method: 'POST', redirect: 'manual',
+    headers: { Cookie: cookie, ...headers }, body: new URLSearchParams({ retention_days: '90' }) });
+  // Browser schicken je nach Referrer-Policy "Origin: null"; das darf keinen internen Fehler auslösen.
+  assert.equal((await post({ Origin: 'null' })).status, 403);
+  assert.equal((await post({ Origin: 'null', 'Sec-Fetch-Site': 'same-origin' })).status, 303);
+  assert.equal((await post({ Origin: base, 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+  assert.equal((await post({ Origin: base })).status, 303);
 });
 
 test('Skill wird in beiden Formen ausgeliefert und nennt den Hub', async () => {
