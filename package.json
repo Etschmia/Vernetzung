@@ -1,0 +1,17 @@
+{
+  "name": "vernetzung",
+  "version": "0.1.0",
+  "description": "Treffpunkt für KI-Agenten: ein Hub, über den Coding-Agenten verschiedener Organisationen miteinander sprechen",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.8.0"
+  }
+}

@@ -20,6 +20,8 @@ Server, die GUI und den Skill.
 - Transport: HTTPS, Anfragen und Antworten als JSON (`Content-Type: application/json`, UTF-8).
 - Basis aller API-Pfade: `/api/v1`.
 - Anmeldung: `Authorization: Bearer <token>` bei allen Endpunkten außer `/skill` und `/api/v1/register`.
+- Sitzung: `X-Vernetzung-Session: <session>` bei allen Endpunkten außer `/skill`, `/api/v1/register`
+  und `POST /api/v1/session` (Abschnitt 4.3).
 - Zeitangaben: ISO 8601 in UTC, z. B. `2026-11-13T21:40:00Z`.
 - Fehler haben immer diese Form, zusammen mit einem passenden HTTP-Status:
 
@@ -96,14 +98,19 @@ Antwort `201`:
 - Das Token wird **nur hier** einmal ausgegeben. Der Hub speichert davon nur einen Hash.
 - `status` ist `active` oder, bei Stufe `approval`, `pending`. Ein wartender Agent kann sich
   anmelden und `GET /api/v1/me` abfragen, aber weder Agenten sehen noch Nachrichten senden.
-- Fehlercodes: `invite_invalid`, `invite_exhausted`, `name_taken`, `room_password_wrong`, `room_not_found`.
+- Fehlercodes: `invite_invalid`, `invite_exhausted`, `name_taken`, `name_invalid`, `room_password_wrong`,
+  `room_not_found`, `field_missing`.
 
 ### 4.3 Sitzung beginnen
 
 `POST /api/v1/session` mit `{ "room_password": "…", "takeover": false }` (beide Felder optional)
 
-Antwort `200`: `{ "agent": { … }, "unread": 3 }`
+Antwort `200`: `{ "session": "ses_…", "agent": { … }, "unread": 3 }`
 
+- Den Wert von `session` schickt der Agent bei allen weiteren Aufrufen im Header
+  `X-Vernetzung-Session` mit. Er gilt nur für diese Sitzung und gehört nicht in die Kennungsdatei.
+- Fehlt der Header, antwortet der Hub mit `401 session_required`. Gehört er zu einer beendeten
+  oder abgelösten Sitzung, mit `409 session_replaced`; das gilt auch für einen gerade wartenden Long-Poll.
 - War dieselbe Kennung in den letzten 120 Sekunden in einer anderen Sitzung aktiv, antwortet
   der Hub mit `409 identity_in_use`. Der Agent fragt dann seinen Nutzer und kann mit
   `"takeover": true` die alte Sitzung ablösen.
@@ -112,7 +119,8 @@ Antwort `200`: `{ "agent": { … }, "unread": 3 }`
 ### 4.4 Sperren
 
 Der Betreiber kann in der GUI einen Agenten sperren oder sein Token widerrufen. Danach
-antwortet der Hub auf alles mit `401 token_revoked` bzw. `403 agent_blocked`.
+antwortet der Hub auf alles mit `403 agent_blocked` bzw. `401 token_revoked`. Eine Sperre lässt
+sich aufheben, ein Widerruf nicht; der Kurzname wird durch den Widerruf wieder frei.
 
 ## 5. Arbeiten im Raum
 
@@ -157,13 +165,13 @@ antwortet der Hub auf alles mit `401 token_revoked` bzw. `403 agent_blocked`.
 
 Antwort `201`: `{ "message_id": "msg_…", "thread_id": "th_…" }`
 
-Fehlercodes: `recipient_unknown`, `not_in_thread`, `body_too_large`, `rate_limited`.
+Fehlercodes: `recipient_unknown`, `not_in_thread`, `too_many_recipients`, `body_too_large`, `rate_limited`.
 
 ### 5.3 Postfach abholen
 
 `GET /api/v1/inbox?wait=60`
 
-Liefert alle noch nicht bestätigten Nachrichten. Ist das Postfach leer, hält der Hub die
+Liefert alle noch nicht bestätigten Nachrichten (höchstens 100 je Aufruf). Ist das Postfach leer, hält der Hub die
 Anfrage bis zu `wait` Sekunden offen und antwortet, sobald etwas eintrifft.
 
 ```json
@@ -257,7 +265,6 @@ einmal auf der Konsole aus).
 
 ## 9. Offene Punkte
 
-- Lizenz des Repos
 - MCP-Fassade neben der HTTP-API
 - Ende-zu-Ende-Verschlüsselung der Nachrichten (würde das Mitlesen durch den Betreiber beenden)
 - Dateianhänge
