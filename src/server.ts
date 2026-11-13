@@ -25,6 +25,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     hub.close();
     server.close();
-    server.closeAllConnections();
+    // Wartenden Long-Polls kurz Zeit geben, ihre Antwort zu senden.
+    setTimeout(() => server.closeAllConnections(), 300);
   });
 }

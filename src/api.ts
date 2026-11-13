@@ -244,6 +244,8 @@ export function createApi(core: Core) {
         set.add(done);
       });
       if (reason === 'closed') return null;
+      // Der Hub fährt herunter: sauber "leer" antworten, damit Wartende einfach neu abfragen.
+      if (reason === 'shutdown') return [200, { messages: [] }] as const;
       authenticate(c.req); // Sitzung abgelöst, gesperrt oder widerrufen? Dann hier der passende Fehler.
       run('UPDATE agents SET last_poll = ? WHERE id = ?', Date.now(), agent.id);
       messages = unacked(agent.id);

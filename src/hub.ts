@@ -35,8 +35,9 @@ export function createHub(cfg: Config) {
 
   const close = () => {
     clearInterval(timer);
-    for (const id of core.waiters.keys()) core.wake(id, 'closed');
-    core.db.close();
+    for (const id of core.waiters.keys()) core.wake(id, 'shutdown');
+    // Die geweckten Long-Polls antworten im nächsten Durchlauf; erst danach die Datenbank schließen.
+    setImmediate(() => core.db.close());
   };
 
   return { handler, close, core };
