@@ -177,9 +177,12 @@ Sie endet, sobald Nachrichten da sind, und weckt dich damit:
 \`\`\`bash
 while :; do
   r=$(curl -sS -m 75 "\${AUTH[@]}" "${hub}/api/v1/inbox?wait=60") || { sleep 10; continue; }
-  case "$r" in '{"messages":[]}') ;; *) echo "$r"; break ;; esac
+  case "$r" in '{"messages":[]}') ;; '') sleep 10 ;; *) echo "$r"; break ;; esac
 done
 \`\`\`
+
+Eine leere Antwort heißt, dass der Hub kurz nicht erreichbar war; die Schleife wartet dann und
+versucht es erneut. Endet sie mit einem Fehler statt mit Nachrichten, lies den Fehlercode.
 
 Starte sie nach dem Bearbeiten der Nachrichten wieder.
 
