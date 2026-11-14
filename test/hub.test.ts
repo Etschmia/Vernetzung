@@ -102,7 +102,7 @@ test('Nachrichten: senden, abholen, bestätigen, antworten, Verlauf', async () =
   const b = await join('alpha', 'bert');
   const sent = await call('POST', '/messages', a, { to: ['bert'], subject: 'Hallo', body: 'Erste Frage' });
   assert.equal(sent.status, 201);
-  assert.deepEqual(sent.json.recipients, [{ name: 'bert', presence: 'recent' }]);
+  assert.deepEqual(sent.json.recipients.map(({ agent_id, ...r }: any) => r), [{ name: 'bert', presence: 'recent' }]);
 
   const inbox = await call('GET', '/inbox', b);
   assert.equal(inbox.json.messages.length, 1);
@@ -133,7 +133,7 @@ test('Long-Poll wird durch eine eintreffende Nachricht geweckt', async () => {
   const list = await call('GET', '/agents', a);
   assert.equal(list.json.agents.find((x: any) => x.name === 'dora').presence, 'listening');
   const sent = await call('POST', '/messages', a, { to: ['dora'], body: 'Weckruf' });
-  assert.deepEqual(sent.json.recipients, [{ name: 'dora', presence: 'listening' }]);
+  assert.deepEqual(sent.json.recipients.map(({ agent_id, ...r }: any) => r), [{ name: 'dora', presence: 'listening' }]);
   const got = await waiting;
   assert.equal(got.json.messages[0].body, 'Weckruf');
   assert.ok(Date.now() - started < 5000);
@@ -269,4 +269,26 @@ test('Fehlversuche eines Clients sperren die Betreiber-Anmeldung anderer nicht',
   assert.equal((await login('geheim-geheim', '203.0.113.9')).status, 429);
   assert.equal((await login('geheim-geheim', '198.51.100.7')).status, 303);
   assert.equal((await login('geheim-geheim')).status, 303);
+});
+
+test('Neu vergebener Kurzname ist an der agent_id vom Vorgänger zu unterscheiden', async () => {
+  await adminPost('/admin/rooms', { slug: 'namen', title: 'Namen' });
+  const receiver = await join('namen', 'empfang');
+  const first = await join('namen', 'vertraut');
+  const firstId = (await call('GET', '/me', first)).json.agent_id;
+  const listed = () => call('GET', '/agents', receiver).then((r) => r.json.agents.find((a: any) => a.name === 'vertraut').agent_id);
+  assert.equal(await listed(), firstId);
+  await call('POST', '/messages', first, { to: ['empfang'], body: 'vom ersten Besitzer' });
+
+  await adminPost('/admin/room/namen/agent', { id: firstId, action: 'revoke' });
+  const second = await join('namen', 'vertraut');
+  const secondId = (await call('GET', '/me', second)).json.agent_id;
+  assert.notEqual(secondId, firstId);
+  assert.equal(await listed(), secondId);
+  await call('POST', '/messages', second, { to: ['empfang'], body: 'vom neuen Besitzer' });
+
+  const inbox = (await call('GET', '/inbox?wait=0', receiver)).json.messages;
+  assert.deepEqual(inbox.map((m: any) => [m.from, m.from_id]), [['vertraut', firstId], ['vertraut', secondId]]);
+  const sent = await call('POST', '/messages', receiver, { to: ['vertraut'], body: 'an wen geht das?' });
+  assert.equal(sent.json.recipients[0].agent_id, secondId);
 });

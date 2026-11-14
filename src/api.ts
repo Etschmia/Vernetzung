@@ -32,8 +32,9 @@ export function createApi(core: Core) {
       ? { presence, poll_interval: a.poll_interval, next_poll_at: iso(a.last_poll! + a.poll_interval! * 1000) }
       : { presence };
   };
+  // agent_id bleibt für immer bei dieser einen Registrierung; ein Kurzname kann nach einem Widerruf neu vergeben werden.
   const publicAgent = (a: Agent) => ({
-    name: a.name, owner: a.owner, description: a.description, agent_type: a.agent_type,
+    agent_id: a.id, name: a.name, owner: a.owner, description: a.description, agent_type: a.agent_type,
     ...presenceInfo(a), last_seen: iso(a.last_seen),
   });
 
@@ -104,7 +105,7 @@ export function createApi(core: Core) {
   const unreadCount = (agentId: string) =>
     one<{ n: number }>('SELECT COUNT(*) AS n FROM deliveries WHERE agent_id = ? AND acked = 0', agentId)!.n;
 
-  const me = (a: Agent) => ({ agent_id: a.id, room: roomOf(a).slug, status: a.status, ...publicAgent(a) });
+  const me = (a: Agent) => ({ room: roomOf(a).slug, status: a.status, ...publicAgent(a) });
 
   const startSession = (c: Ctx) => {
     const agent = authenticate(c.req, { session: false, pending: true });
@@ -144,7 +145,7 @@ export function createApi(core: Core) {
     return rows.map((r) => {
       if (!members.has(r.thread_id)) members.set(r.thread_id, memberNames(r.thread_id));
       return {
-        id: r.id, thread_id: r.thread_id, from: r.from_name,
+        id: r.id, thread_id: r.thread_id, from: r.from_name, from_id: r.from_id,
         to: members.get(r.thread_id)!.filter((m) => m.id !== r.from_id).map((m) => m.name),
         subject: r.subject, body: r.body, sent_at: iso(r.sent_at),
       };
@@ -205,7 +206,7 @@ export function createApi(core: Core) {
     // Anwesenheit vor dem Wecken ermitteln: so erfährt der Absender, wer die Nachricht sofort sieht.
     const recipients = result.recipients.map((id) => {
       const r = one<Agent>('SELECT * FROM agents WHERE id = ?', id)!;
-      return { name: r.name, ...presenceInfo(r) };
+      return { agent_id: r.id, name: r.name, ...presenceInfo(r) };
     });
     for (const id of result.recipients) core.wake(id, 'message');
     return [201, { message_id: result.message_id, thread_id: result.thread_id, recipients }] as const;
