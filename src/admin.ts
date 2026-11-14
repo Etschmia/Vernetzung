@@ -392,13 +392,15 @@ ${error ? `<div class="note">${h(error)}</div>` : ''}
       } else if (sub === '/settings') {
         const level = f('auth_level');
         if (!AUTH_LEVELS.includes(level)) throw new HttpError(400, 'level', 'Unbekannte Sicherheitsstufe.');
-        run('UPDATE rooms SET auth_level = ? WHERE id = ?', level, room.id);
+        // Erst alles prüfen, dann in einem Schritt speichern: eine abgelehnte Eingabe ändert nichts.
         const pwAction = f('pw_action');
+        let hash = room.password_hash;
         if (pwAction === 'set') {
           const pw = form.get('password') ?? '';
           if (pw.length < 8) throw new HttpError(400, 'password', 'Das Raumpasswort braucht mindestens 8 Zeichen.');
-          run('UPDATE rooms SET password_hash = ? WHERE id = ?', hashPassword(pw), room.id);
-        } else if (pwAction === 'clear') run('UPDATE rooms SET password_hash = NULL WHERE id = ?', room.id);
+          hash = hashPassword(pw);
+        } else if (pwAction === 'clear') hash = null;
+        run('UPDATE rooms SET auth_level = ?, password_hash = ? WHERE id = ?', level, hash, room.id);
       } else if (sub === '/agent') {
         const agent = one<Agent>('SELECT * FROM agents WHERE id = ? AND room_id = ?', f('id'), room.id);
         const next = ({ approve: ['pending', 'active'], block: ['active', 'blocked'], unblock: ['blocked', 'active'] } as

@@ -241,3 +241,20 @@ test('Ungültiges Anfrageziel liefert 400 und beendet den Hub nicht', async () =
   assert.match(answer, /^HTTP\/1\.1 400 /);
   assert.equal((await fetch(`${base}/healthz`)).status, 200);
 });
+
+test('Abgelehnte Zugangseinstellungen ändern weder Sicherheitsstufe noch Raumpasswort', async () => {
+  await adminPost('/admin/rooms', { slug: 'tresor', title: 'Tresor' });
+  const state = () => hub.core.one<{ auth_level: string; password_hash: string | null }>(
+    "SELECT auth_level, password_hash FROM rooms WHERE slug = 'tresor'")!;
+  const before = state();
+  assert.equal(before.auth_level, 'invite');
+  const r = await adminPost('/admin/room/tresor/settings', { auth_level: 'open', pw_action: 'set', password: 'kurz' });
+  assert.equal(r.status, 400);
+  assert.deepEqual(state(), before);
+  const reg = await call('POST', '/register', undefined, { room: 'tresor', name: 'gast', owner: 'G', description: 'd' });
+  assert.notEqual(reg.status, 201);
+  // Gültige Eingaben werden zusammen gespeichert.
+  assert.equal((await adminPost('/admin/room/tresor/settings', { auth_level: 'open', pw_action: 'set', password: 'lang-genug' })).status, 303);
+  assert.equal(state().auth_level, 'open');
+  assert.ok(state().password_hash);
+});
