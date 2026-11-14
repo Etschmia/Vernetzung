@@ -1,6 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { connect } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { createHub } from '../src/hub.ts';
 
@@ -225,4 +226,18 @@ test('GUI zeigt Gespräche und maskiert HTML in Nachrichten', async () => {
   assert.ok(!page.includes('<script>alert(1)'));
   const room = await (await fetch(`${base}/admin/room/alpha`, { headers: { Cookie: cookie } })).text();
   assert.ok(room.includes('&lt;b&gt;fett&lt;/b&gt;'));
+});
+
+test('Ungültiges Anfrageziel liefert 400 und beendet den Hub nicht', async () => {
+  const port = (server.address() as AddressInfo).port;
+  const answer = await new Promise<string>((resolve, reject) => {
+    let data = '';
+    const socket = connect(port, '127.0.0.1', () => socket.write('GET //[ HTTP/1.1\r\nHost: hub\r\nConnection: close\r\n\r\n'));
+    socket.on('data', (chunk) => (data += chunk));
+    socket.on('end', () => resolve(data));
+    socket.on('error', reject);
+    socket.setTimeout(3000, () => { socket.destroy(); reject(new Error('keine Antwort')); });
+  });
+  assert.match(answer, /^HTTP\/1\.1 400 /);
+  assert.equal((await fetch(`${base}/healthz`)).status, 200);
 });

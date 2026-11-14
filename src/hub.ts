@@ -20,7 +20,13 @@ export function createHub(cfg: Config) {
   };
 
   const handler = (req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url ?? '/', 'http://hub');
+    // Der HTTP-Parser lässt Ziele wie "//[" durch, die der URL-Konstruktor ablehnt.
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', 'http://hub');
+    } catch {
+      return text(res, 400, 'text/plain', 'Ungültige Anfrage-Adresse.\n');
+    }
     const path = url.pathname;
     if (path.startsWith('/api/v1/')) return void api(req, res, url);
     if (path === '/admin' || path.startsWith('/admin/')) return void admin(req, res, url);
