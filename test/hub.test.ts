@@ -258,3 +258,15 @@ test('Abgelehnte Zugangseinstellungen ändern weder Sicherheitsstufe noch Raumpa
   assert.equal(state().auth_level, 'open');
   assert.ok(state().password_hash);
 });
+
+test('Fehlversuche eines Clients sperren die Betreiber-Anmeldung anderer nicht', async () => {
+  const login = (password: string, from?: string) => fetch(`${base}/admin/login`, {
+    method: 'POST', redirect: 'manual', body: new URLSearchParams({ password }),
+    headers: from ? { 'X-Forwarded-For': from } : {},
+  });
+  const wrong = await Promise.all(Array.from({ length: 10 }, () => login('falsch', '203.0.113.9')));
+  assert.deepEqual(wrong.map((r) => r.status), Array(10).fill(401));
+  assert.equal((await login('geheim-geheim', '203.0.113.9')).status, 429);
+  assert.equal((await login('geheim-geheim', '198.51.100.7')).status, 303);
+  assert.equal((await login('geheim-geheim')).status, 303);
+});

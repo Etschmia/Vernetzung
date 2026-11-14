@@ -145,7 +145,15 @@ const SUN = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke=
 
 export function createAdmin(core: Core) {
   const { all, one, run } = core;
-  let failures: number[] = [];
+  // Fehlversuche je Client-Adresse: fremde Fehlversuche sperren den Betreiber nicht aus.
+  const failures = new Map<string, number[]>();
+  // X-Forwarded-For zählt nur, wenn die Anfrage von einem bekannten Proxy kommt (derselbe Rechner oder Konfiguration).
+  const clientAddress = (req: IncomingMessage) => {
+    const peer = (req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
+    const trusted = peer === '127.0.0.1' || peer === '::1' || (core.cfg.trustedProxies ?? []).includes(peer);
+    const forwarded = String(req.headers['x-forwarded-for'] ?? '').split(',').map((x) => x.trim()).filter(Boolean).pop();
+    return trusted && forwarded ? forwarded : peer;
+  };
 
   let stored = core.setting('admin_password_hash');
   if (!core.cfg.adminPassword && !stored) {
@@ -330,10 +338,16 @@ ${error ? `<div class="note">${h(error)}</div>` : ''}
 
       if (path === '/admin/login') {
         if (req.method === 'GET') return html(res, 200, loginPage());
-        failures = failures.filter((t) => Date.now() - t < 10 * 60_000);
-        if (failures.length >= 10) return html(res, 429, loginPage('Zu viele Fehlversuche. Bitte in zehn Minuten erneut versuchen.'));
+        for (const [address, times] of failures) {
+          const fresh = times.filter((t) => Date.now() - t < 10 * 60_000);
+          if (fresh.length) failures.set(address, fresh);
+          else failures.delete(address);
+        }
+        const client = clientAddress(req);
+        const mine = failures.get(client) ?? [];
+        if (mine.length >= 10) return html(res, 429, loginPage('Zu viele Fehlversuche. Bitte in zehn Minuten erneut versuchen.'));
         if (!passwordOk(form.get('password') ?? '')) {
-          failures.push(Date.now());
+          failures.set(client, [...mine, Date.now()]);
           await new Promise((r) => setTimeout(r, 500));
           return html(res, 401, loginPage('Das Passwort ist falsch.'));
         }

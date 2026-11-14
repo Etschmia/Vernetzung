@@ -9,6 +9,8 @@ export type Config = {
   dbPath: string;
   adminPassword?: string;
   publicUrl?: string;
+  /** Adressen vorgeschalteter Proxys, deren X-Forwarded-For gilt. Derselbe Rechner gilt immer. */
+  trustedProxies?: string[];
   log?: (line: string) => void;
 };
 

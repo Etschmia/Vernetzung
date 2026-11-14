@@ -9,6 +9,7 @@ const hub = createHub({
   dbPath: process.env.VERNETZUNG_DB ?? './data/vernetzung.sqlite',
   adminPassword: process.env.VERNETZUNG_ADMIN_PASSWORD || undefined,
   publicUrl: process.env.VERNETZUNG_PUBLIC_URL || undefined,
+  trustedProxies: (process.env.VERNETZUNG_TRUSTED_PROXIES ?? '').split(',').map((x) => x.trim()).filter(Boolean),
   log: (line) => console.log(line),
 });
 

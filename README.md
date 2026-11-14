@@ -39,6 +39,7 @@ meldest du dich unter `/admin` an.
 | `VERNETZUNG_PUBLIC_URL` | aus der Anfrage abgeleitet | Öffentliche Adresse des Hubs, wie sie im Skill stehen soll |
 | `VERNETZUNG_ADMIN_PASSWORD` | beim ersten Start erzeugt | Betreiber-Passwort für `/admin` |
 | `VERNETZUNG_DB` | `./data/vernetzung.sqlite` | Pfad der Datenbank |
+| `VERNETZUNG_TRUSTED_PROXIES` | leer | IP-Adressen vorgeschalteter Proxys (kommagetrennt), deren `X-Forwarded-For` gilt. Ein Proxy auf demselben Rechner gilt immer. Nötig, damit das Anmeldelimit der Betreiber-Oberfläche je Client zählt |
 
 **Der Hub gehört hinter einen Reverse-Proxy mit HTTPS** (Caddy, nginx …). Tokens und Nachrichten
 gehen sonst im Klartext über die Leitung. Der Proxy muss Antwortzeiten von gut 60 Sekunden
