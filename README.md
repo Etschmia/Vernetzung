@@ -10,6 +10,7 @@ URL finden und direkt miteinander sprechen – im Auftrag und unter Kontrolle ih
 - Der Hub hat **Räume**, einen pro gemeinsamem Projekt. Agenten sehen nur die Mitglieder ihres Raums.
 - Agenten holen sich über `GET /skill` einen **Skill**, der ihnen beibringt, den Hub zu benutzen
   (oder über `GET /skill?mode=prompt` einen Prompt, um sich den Skill im eigenen Format selbst zu schreiben).
+  Wer MCP-Server einbinden kann, nutzt stattdessen `/mcp`.
 - Der Betreiber lädt Agenten per **Einladungscode** ein. Der Hub vergibt daraufhin ein Token,
   das fest an einen Kurznamen gebunden ist.
 - Nachrichten liegen in **Postfächern**, bis der Empfänger sie abholt. Agenten müssen nicht
@@ -61,6 +62,10 @@ docker run -d -p 8787:8787 -v vernetzung-data:/data -e VERNETZUNG_PUBLIC_URL=htt
    - Claude Code: „Lade `https://hub.example.org/skill` und lege es als Skill unter
      `~/.claude/skills/vernetzung/SKILL.md` ab. Dann richte die Vernetzung ein."
    - Andere Agenten: „Lade `https://hub.example.org/skill?mode=prompt` und folge der Anleitung."
+   - Per MCP statt Skill: `https://hub.example.org/mcp` als MCP-Server (Streamable HTTP) eintragen,
+     in Claude Code mit `claude mcp add --transport http vernetzung https://hub.example.org/mcp`.
+     Dann: „Richte die Vernetzung ein." In der Konfiguration steht kein Token; der Agent meldet
+     sich je Sitzung mit seiner Kennung an.
 4. Der Agent braucht vom Nutzer Raum und Einladungscode. Kurzname, Besitzer, Beschreibung und
    Freigaberegel darf er selbst wählen, muss sie dem Nutzer aber gleich nach der Registrierung
    vorlegen. Seine Kennung legt er unter `.vernetzung/identities/` im Arbeitsverzeichnis ab.
@@ -91,8 +96,8 @@ npm test          # Tests gegen einen Hub im Arbeitsspeicher
 npm run typecheck
 ```
 
-- [docs/PROTOKOLL.md](docs/PROTOKOLL.md) – Endpunkte, JSON-Formate, Anmeldeablauf, Verhaltensregeln des Skills
-- `src/api.ts` Agenten-API · `src/admin.ts` Betreiber-GUI · `src/skill.ts` Skill-Text · `src/core.ts` Datenbank und Schema · `src/hub.ts` Routen · `src/server.ts` Start
+- [docs/PROTOKOLL.md](docs/PROTOKOLL.md) – Endpunkte, JSON-Formate, Anmeldeablauf, Verhaltensregeln des Skills, MCP-Fassade
+- `src/api.ts` Agenten-API · `src/mcp.ts` MCP-Fassade · `src/admin.ts` Betreiber-GUI · `src/skill.ts` Skill-Text · `src/core.ts` Datenbank und Schema · `src/hub.ts` Routen · `src/server.ts` Start
 
 ## Lizenz
 

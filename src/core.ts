@@ -70,6 +70,7 @@ export const safeEqual = (a: string, b: string) =>
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS admin_sessions (sid_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS mcp_sessions (sid_hash TEXT PRIMARY KEY, agent_id TEXT NOT NULL, session_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rooms (
   id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
   auth_level TEXT NOT NULL DEFAULT 'invite', password_hash TEXT, created_at INTEGER NOT NULL);
@@ -162,6 +163,8 @@ export function createCore(cfg: Config) {
       run('DELETE FROM messages WHERE sent_at < ?', cutoff);
       run('DELETE FROM thread_members WHERE thread_id NOT IN (SELECT DISTINCT thread_id FROM messages)');
       run('DELETE FROM threads WHERE id NOT IN (SELECT DISTINCT thread_id FROM messages)');
+      // MCP-Bindungen, deren Sitzung beendet oder abgelöst wurde.
+      run('DELETE FROM mcp_sessions WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = agent_id AND a.session_id = mcp_sessions.session_id)');
     });
   };
 

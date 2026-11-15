@@ -292,3 +292,90 @@ test('Neu vergebener Kurzname ist an der agent_id vom Vorgänger zu unterscheide
   const sent = await call('POST', '/messages', receiver, { to: ['vertraut'], body: 'an wen geht das?' });
   assert.equal(sent.json.recipients[0].agent_id, secondId);
 });
+
+// ---- MCP-Fassade ----
+const mcpPost = async (body: unknown, sid?: string, extra: Record<string, string> = {}) => {
+  const r = await fetch(`${base}/mcp`, {
+    method: 'POST', body: JSON.stringify(body),
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...(sid ? { 'Mcp-Session-Id': sid } : {}), ...extra },
+  });
+  return { status: r.status, sid: r.headers.get('mcp-session-id'), json: r.status === 200 ? ((await r.json()) as any) : undefined };
+};
+const mcpOpen = async () => {
+  const init = await mcpPost({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } } });
+  assert.equal(init.status, 200);
+  assert.equal(init.json.result.protocolVersion, '2025-06-18');
+  assert.match(init.json.result.instructions, /Erstkontakt/);
+  assert.equal((await mcpPost({ jsonrpc: '2.0', method: 'notifications/initialized' }, init.sid!)).status, 202);
+  return init.sid!;
+};
+let rpcId = 10;
+const mcpTool = async (sid: string, name: string, args: Record<string, unknown> = {}) => {
+  const r = await mcpPost({ jsonrpc: '2.0', id: ++rpcId, method: 'tools/call', params: { name, arguments: args } }, sid);
+  assert.equal(r.status, 200);
+  return { isError: r.json.result.isError === true, data: JSON.parse(r.json.result.content[0].text) };
+};
+
+test('MCP: Verbindungsaufbau, Werkzeugliste, Fehlerfälle des Transports', async () => {
+  const sid = await mcpOpen();
+  const list = await mcpPost({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, sid);
+  assert.deepEqual(list.json.result.tools.map((t: any) => t.name),
+    ['registrieren', 'anmelden', 'abmelden', 'wer_bin_ich', 'agenten', 'senden', 'postfach', 'bestaetigen', 'gespraeche', 'gespraech']);
+  assert.equal((await mcpPost({ jsonrpc: '2.0', id: 3, method: 'tools/list' })).json.error.code, -32600);
+  assert.equal((await mcpPost({ jsonrpc: '2.0', id: 4, method: 'gibt/es/nicht' }, sid)).json.error.code, -32601);
+  assert.equal((await mcpPost({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'unbekannt' } }, sid)).json.error.code, -32602);
+  assert.equal((await mcpPost({ jsonrpc: '2.0', id: 6, method: 'tools/list' }, sid, { Origin: 'https://boese.example' })).status, 403);
+  assert.equal((await fetch(`${base}/mcp`, { method: 'POST', body: '{kaputt' })).status, 400);
+  assert.equal((await fetch(`${base}/mcp`)).status, 405);
+  const unbound = await mcpTool(sid, 'agenten');
+  assert.ok(unbound.isError);
+  assert.equal(unbound.data.error.code, 'not_logged_in');
+});
+
+test('MCP: registrieren, anmelden und Nachrichten mit einem Agenten der HTTP-API austauschen', async () => {
+  await adminPost('/admin/rooms', { slug: 'mcp', title: 'MCP' });
+  const http = await join('mcp', 'per-http');
+  const sid = await mcpOpen();
+  const reg = await mcpTool(sid, 'registrieren', { room: 'mcp', invite: await newInvite('mcp'), name: 'per-mcp', owner: 'M', description: 'd' });
+  assert.match(reg.data.token, /^vnz_/);
+  assert.ok((await mcpTool(sid, 'anmelden', { token: 'vnz_falsch' })).isError);
+  const login = await mcpTool(sid, 'anmelden', { token: reg.data.token });
+  assert.equal(login.data.agent.name, 'per-mcp');
+  assert.equal(login.data.session, undefined);
+  assert.equal((await mcpTool(sid, 'wer_bin_ich')).data.agent_id, reg.data.agent_id);
+  assert.deepEqual((await mcpTool(sid, 'agenten')).data.agents.map((a: any) => a.name), ['per-http', 'per-mcp']);
+
+  // MCP wartet per Long-Poll, die HTTP-Seite schreibt.
+  const waiting = mcpTool(sid, 'postfach', { wait: 5 });
+  await new Promise((r) => setTimeout(r, 100));
+  const sent = await call('POST', '/messages', http, { to: ['per-mcp'], subject: 'Hallo', body: 'von HTTP' });
+  assert.equal(sent.json.recipients[0].presence, 'listening');
+  const got = (await waiting).data.messages;
+  assert.equal(got[0].body, 'von HTTP');
+  assert.equal((await mcpTool(sid, 'bestaetigen', { up_to: got[0].id })).data.unread, 0);
+  await mcpTool(sid, 'senden', { thread_id: got[0].thread_id, body: 'von MCP' });
+  assert.equal((await call('GET', '/inbox?wait=0', http)).json.messages[0].body, 'von MCP');
+  assert.equal((await mcpTool(sid, 'gespraech', { thread_id: got[0].thread_id })).data.messages.length, 2);
+  assert.equal((await mcpTool(sid, 'gespraeche')).data.threads.length, 1);
+  assert.equal((await mcpTool(sid, 'postfach', { every: 300 })).data.messages.length, 0);
+  assert.equal((await call('GET', '/agents', http)).json.agents[1].presence, 'polling');
+
+  // Zwei MCP-Sitzungen, zwei Kennungen: jede sieht nur ihre eigene.
+  const sid2 = await mcpOpen();
+  const reg2 = await mcpTool(sid2, 'registrieren', { room: 'mcp', invite: await newInvite('mcp'), name: 'zweiter', owner: 'Z', description: 'd' });
+  await mcpTool(sid2, 'anmelden', { token: reg2.data.token });
+  assert.equal((await mcpTool(sid2, 'wer_bin_ich')).data.name, 'zweiter');
+  assert.equal((await mcpTool(sid, 'wer_bin_ich')).data.name, 'per-mcp');
+
+  // Dieselbe Kennung in einer weiteren MCP-Sitzung: erst abgelehnt, nach Ablösen ist die alte Sitzung gelöst.
+  const sid3 = await mcpOpen();
+  assert.equal((await mcpTool(sid3, 'anmelden', { token: reg.data.token })).data.error.code, 'identity_in_use');
+  assert.equal((await mcpTool(sid3, 'anmelden', { token: reg.data.token, takeover: true })).data.agent.name, 'per-mcp');
+  assert.equal((await mcpTool(sid, 'wer_bin_ich')).data.error.code, 'not_logged_in');
+
+  assert.deepEqual((await mcpTool(sid3, 'abmelden')).data, { ok: true });
+  assert.equal((await mcpTool(sid3, 'agenten')).data.error.code, 'not_logged_in');
+  // Beenden der MCP-Sitzung meldet die Kennung ab.
+  assert.equal((await fetch(`${base}/mcp`, { method: 'DELETE', headers: { 'Mcp-Session-Id': sid2 } })).status, 204);
+  assert.equal(hub.core.one<{ session_id: string | null }>('SELECT session_id FROM agents WHERE id = ?', reg2.data.agent_id)!.session_id, null);
+});

@@ -1,0 +1,200 @@
+// MCP-Fassade unter /mcp: dieselben Funktionen wie /api/v1, als Werkzeuge für MCP-Clients.
+// Transport: Streamable HTTP, Antworten als JSON. Die Kennung steht nicht in der MCP-Konfiguration,
+// sondern wird je MCP-Sitzung mit dem Werkzeug "anmelden" gebunden – siehe docs/PROTOKOLL.md.
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { HttpError, newId, readBody, sha256 } from './core.ts';
+import type { Core } from './core.ts';
+import type { ApiResult, Caller, Ctx } from './api.ts';
+import { mcpInstructions } from './skill.ts';
+
+type Json = Record<string, unknown>;
+type Invoke = (route: string, c: Ctx) => Promise<ApiResult>;
+type Binding = { agent_id: string; session_id: string };
+
+const VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
+const SID_RE = /^mcp_[\w-]{16,64}$/;
+
+const text = { type: 'string' };
+const tool = (name: string, description: string, properties: Json = {}, required: string[] = []) => ({
+  name, description, inputSchema: { type: 'object', properties, required },
+});
+
+const TOOLS = [
+  tool('registrieren',
+    'Legt eine neue Kennung in einem Raum an. Raum und Einladungscode kommen vom Nutzer. Die Antwort enthält das Token – nur dieses eine Mal. Speichere die Kennung sofort wie in den Hinweisen des Servers beschrieben und rufe danach "anmelden" auf.',
+    {
+      room: { ...text, description: 'Kurzname des Raums' },
+      invite: { ...text, description: 'Einladungscode (inv_…); entfällt nur bei offenen Räumen' },
+      name: { ...text, description: 'Kurzname des Agenten: a–z, 0–9, Bindestrich, 2 bis 32 Zeichen' },
+      owner: { ...text, description: 'Wem der Agent gehört (Person, Organisation)' },
+      description: { ...text, description: 'Was der Agent kann und weiß' },
+      agent_type: { ...text, description: 'Art des Agenten, z. B. claude-code' },
+      room_password: { ...text, description: 'Raumpasswort, falls der Raum eines hat' },
+    }, ['room', 'name', 'owner', 'description']),
+  tool('anmelden',
+    'Bindet diese MCP-Sitzung an eine Kennung. Nötig vor allen anderen Werkzeugen außer "registrieren". Bei identity_in_use den Nutzer fragen, bevor takeover gesetzt wird.',
+    {
+      token: { ...text, description: 'Token der Kennung (vnz_…) aus der Kennungsdatei' },
+      takeover: { type: 'boolean', description: 'true löst eine andere aktive Sitzung derselben Kennung ab' },
+      room_password: { ...text, description: 'Raumpasswort, falls der Raum eines hat' },
+    }, ['token']),
+  tool('abmelden', 'Beendet die Sitzung der Kennung und löst die Bindung an diese MCP-Sitzung.'),
+  tool('wer_bin_ich', 'Zeigt die angemeldete Kennung mit Raum und Status.'),
+  tool('agenten', 'Listet die Agenten im Raum mit agent_id, Besitzer, Beschreibung und Anwesenheit (presence).'),
+  tool('senden',
+    'Schickt eine Nachricht. Neues Gespräch: "to" (und "subject"). Antwort in einem Gespräch: "thread_id", ohne "to". Die Antwort nennt die Anwesenheit der Empfänger.',
+    {
+      to: { type: 'array', items: text, description: 'Kurznamen der Empfänger (nur bei neuem Gespräch)' },
+      subject: { ...text, description: 'Betreff (nur bei neuem Gespräch)' },
+      body: { ...text, description: 'Nachrichtentext, höchstens 32 KB' },
+      thread_id: { ...text, description: 'Gespräch, in dem geantwortet wird (th_…)' },
+    }, ['body']),
+  tool('postfach',
+    'Holt alle unbestätigten Nachrichten. Mit "wait" wartet der Aufruf bis zu so viele Sekunden auf Post (zählt als Zuhören). Mit "every" meldet der Agent an, in welchem Rhythmus er abfragt.',
+    {
+      wait: { type: 'integer', minimum: 0, maximum: 60, description: 'Sekunden, die auf Post gewartet wird; Standard 0' },
+      every: { type: 'integer', minimum: 30, maximum: 86400, description: 'Angemeldeter Abfrage-Rhythmus in Sekunden' },
+    }),
+  tool('bestaetigen', 'Bestätigt alle Nachrichten bis einschließlich der genannten; unbestätigte kommen wieder.',
+    { up_to: { ...text, description: 'id der letzten bearbeiteten Nachricht (msg_…)' } }, ['up_to']),
+  tool('gespraeche', 'Listet die Gespräche der Kennung.'),
+  tool('gespraech', 'Liefert ein Gespräch vollständig.', { thread_id: { ...text, description: 'th_…' } }, ['thread_id']),
+];
+
+export function createMcp(core: Core, invoke: Invoke) {
+  const { one, run } = core;
+
+  const binding = (sid: string) => one<Binding>('SELECT agent_id, session_id FROM mcp_sessions WHERE sid_hash = ?', sha256(sid));
+  const unbind = (sid: string) => run('DELETE FROM mcp_sessions WHERE sid_hash = ?', sha256(sid));
+
+  const callTool = async (name: string, args: Json, sid: string, res: ServerResponse): Promise<unknown> => {
+    const api = (route: string, req: Caller, body: Json = {}) =>
+      invoke(route.split('?')[0], { req, res, url: new URL(route.split(' ')[1], 'http://hub'), body });
+
+    if (name === 'registrieren') return (await api('POST /register', { headers: {} }, args))?.[1];
+    if (name === 'anmelden') {
+      if (typeof args.token !== 'string') throw new HttpError(400, 'field_missing', 'Feld "token" fehlt.');
+      const result = await api('POST /session', { headers: { authorization: `Bearer ${args.token}` } }, args);
+      const { session, ...rest } = result![1] as { session: string; agent: { agent_id: string } };
+      // Eine Kennung hat genau eine Sitzung; ältere Bindungen derselben Kennung sind damit hinfällig.
+      run('DELETE FROM mcp_sessions WHERE agent_id = ? OR sid_hash = ?', rest.agent.agent_id, sha256(sid));
+      run('INSERT INTO mcp_sessions (sid_hash, agent_id, session_id) VALUES (?, ?, ?)', sha256(sid), rest.agent.agent_id, session);
+      return rest;
+    }
+
+    const bound = binding(sid);
+    if (!bound) throw new HttpError(401, 'not_logged_in', 'Diese MCP-Sitzung ist an keine Kennung gebunden. Erst "anmelden" aufrufen.');
+    const me: Caller = { headers: { 'x-vernetzung-session': bound.session_id }, agentId: bound.agent_id };
+    const query = new URLSearchParams();
+    for (const key of ['wait', 'every']) if (args[key] != null) query.set(key, String(args[key]));
+    const route =
+      name === 'abmelden' ? 'DELETE /session'
+      : name === 'wer_bin_ich' ? 'GET /me'
+      : name === 'agenten' ? 'GET /agents'
+      : name === 'senden' ? 'POST /messages'
+      : name === 'postfach' ? `GET /inbox?${query}`
+      : name === 'bestaetigen' ? 'POST /inbox/ack'
+      : name === 'gespraeche' ? 'GET /threads'
+      : name === 'gespraech' && /^[\w-]+$/.test(String(args.thread_id)) ? `GET /threads/${args.thread_id}`
+      : null;
+    if (!route) throw new HttpError(404, 'not_found', 'Dieses Gespräch gibt es nicht.');
+    try {
+      const result = await api(route, me, args);
+      if (name === 'abmelden') unbind(sid);
+      return result?.[1];
+    } catch (err) {
+      // Die Sitzung gilt nicht mehr: Bindung lösen, damit ein neues "anmelden" sauber beginnt.
+      if (err instanceof HttpError && ['session_replaced', 'token_revoked', 'token_invalid'].includes(err.code)) unbind(sid);
+      throw err;
+    }
+  };
+
+  // Beantwortet eine JSON-RPC-Nachricht. undefined heißt: Benachrichtigung, keine Antwort.
+  const answer = async (msg: Json, sid: string | undefined, res: ServerResponse, hub: string, headers: Record<string, string>) => {
+    const id = msg.id;
+    const ok = (result: unknown) => ({ jsonrpc: '2.0', id, result });
+    const fail = (code: number, message: string) => ({ jsonrpc: '2.0', id: id ?? null, error: { code, message } });
+    if (msg.jsonrpc !== '2.0' || typeof msg.method !== 'string') return 'result' in msg || 'error' in msg ? undefined : fail(-32600, 'Ungültige Anfrage.');
+    if (id === undefined) return undefined;
+    const params = (msg.params ?? {}) as Json;
+
+    if (msg.method === 'initialize') {
+      headers['Mcp-Session-Id'] = newId('mcp_', 24);
+      const wanted = String(params.protocolVersion);
+      return ok({
+        protocolVersion: VERSIONS.includes(wanted) ? wanted : VERSIONS[1],
+        capabilities: { tools: {} },
+        serverInfo: { name: 'vernetzung', title: 'Vernetzung-Hub', version: '1.0.0' },
+        instructions: mcpInstructions(hub),
+      });
+    }
+    if (msg.method === 'ping') return ok({});
+    if (!sid) return fail(-32600, 'Die Kopfzeile Mcp-Session-Id fehlt. Erst "initialize" aufrufen.');
+    if (msg.method === 'tools/list') return ok({ tools: TOOLS });
+    if (msg.method === 'tools/call') {
+      const name = String(params.name);
+      if (!TOOLS.some((t) => t.name === name)) return fail(-32602, `Unbekanntes Werkzeug: ${name}`);
+      const args = (params.arguments ?? {}) as Json;
+      try {
+        const result = await callTool(name, args, sid, res);
+        if (result === undefined) return undefined; // Verbindung während des Wartens beendet
+        return ok({ content: [{ type: 'text', text: JSON.stringify(result) }] });
+      } catch (err) {
+        if (!(err instanceof HttpError)) throw err;
+        return ok({ content: [{ type: 'text', text: JSON.stringify({ error: { code: err.code, message: err.message } }) }], isError: true });
+      }
+    }
+    return fail(-32601, `Unbekannte Methode: ${msg.method}`);
+  };
+
+  return async function handleMcp(req: IncomingMessage, res: ServerResponse) {
+    const send = (status: number, body?: unknown, headers: Record<string, string> = {}) => {
+      if (res.destroyed || res.headersSent) return;
+      res.writeHead(status, { ...(body === undefined ? {} : { 'Content-Type': 'application/json; charset=utf-8' }), 'Cache-Control': 'no-store', ...headers });
+      res.end(body === undefined ? undefined : JSON.stringify(body));
+    };
+    try {
+      // Schutz vor DNS-Rebinding: Browser-Anfragen fremder Herkunft werden abgelehnt.
+      const origin = req.headers.origin;
+      const own = [`http://${req.headers.host}`, `https://${req.headers.host}`, new URL(core.baseUrl(req)).origin];
+      if (origin != null && !own.includes(origin)) return send(403, { error: 'Anfrage von fremder Herkunft abgelehnt.' });
+
+      const sidHeader = req.headers['mcp-session-id'];
+      const sid = typeof sidHeader === 'string' ? sidHeader : undefined;
+      if (sid && !SID_RE.test(sid)) return send(404, { error: 'Unbekannte MCP-Sitzung.' });
+
+      if (req.method === 'DELETE') {
+        const bound = sid && binding(sid);
+        if (sid && bound) {
+          await invoke('DELETE /session', { req: { headers: { 'x-vernetzung-session': bound.session_id }, agentId: bound.agent_id }, res, url: new URL('http://hub/session'), body: {} })
+            .catch(() => null);
+          unbind(sid);
+        }
+        return send(204);
+      }
+      // Der Hub schickt nichts unaufgefordert; einen SSE-Kanal per GET gibt es nicht.
+      if (req.method !== 'POST') return send(405, undefined, { Allow: 'POST, DELETE' });
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readBody(req));
+      } catch (err) {
+        if (err instanceof HttpError) return send(err.status, { jsonrpc: '2.0', id: null, error: { code: -32600, message: err.message } });
+        return send(400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Der Anfragetext ist kein gültiges JSON.' } });
+      }
+      const batch = Array.isArray(parsed);
+      const messages = (batch ? parsed : [parsed]) as Json[];
+      const headers: Record<string, string> = {};
+      const answers = [];
+      for (const msg of messages) {
+        const a = await answer(msg !== null && typeof msg === 'object' ? msg : {}, sid, res, core.baseUrl(req), headers);
+        if (a) answers.push(a);
+      }
+      if (answers.length === 0) return send(202);
+      send(200, batch ? answers : answers[0], headers);
+    } catch (err) {
+      core.cfg.log?.(`Fehler: ${(err as Error).stack}`);
+      send(500, { jsonrpc: '2.0', id: null, error: { code: -32603, message: 'Interner Fehler des Hubs.' } });
+    }
+  };
+}

@@ -7,7 +7,10 @@ import {
 import type { Agent, Core, Room } from './core.ts';
 
 type Json = Record<string, unknown>;
-type Ctx = { req: IncomingMessage; res: ServerResponse; url: URL; body: Json };
+// Wer ruft: eine HTTP-Anfrage mit Token im Kopf oder, hubintern (MCP-Fassade), ein bereits geprüfter Agent.
+export type Caller = { headers: IncomingMessage['headers']; agentId?: string };
+export type Ctx = { req: Caller; res: ServerResponse; url: URL; body: Json };
+export type ApiResult = readonly [number, unknown] | null;
 
 const str = (v: unknown, field: string, max: number, required = true): string => {
   if (v == null || v === '') {
@@ -47,11 +50,15 @@ export function createApi(core: Core) {
   };
 
   // Prüft Token, Status und Sitzung. Wird auch nach dem Wecken eines Long-Polls erneut aufgerufen.
-  const authenticate = (req: IncomingMessage, opts: { session?: boolean; pending?: boolean } = {}): Agent => {
-    const header = req.headers.authorization ?? '';
-    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
-    if (!token) throw new HttpError(401, 'token_missing', 'Der Authorization-Header mit Bearer-Token fehlt.');
-    const agent = one<Agent>('SELECT * FROM agents WHERE token_hash = ?', sha256(token));
+  const authenticate = (req: Caller, opts: { session?: boolean; pending?: boolean } = {}): Agent => {
+    let agent: Agent | undefined;
+    if (req.agentId) agent = one<Agent>('SELECT * FROM agents WHERE id = ?', req.agentId);
+    else {
+      const header = req.headers.authorization ?? '';
+      const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+      if (!token) throw new HttpError(401, 'token_missing', 'Der Authorization-Header mit Bearer-Token fehlt.');
+      agent = one<Agent>('SELECT * FROM agents WHERE token_hash = ?', sha256(token));
+    }
     if (!agent) throw new HttpError(401, 'token_invalid', 'Das Token ist unbekannt.');
     if (agent.status === 'revoked') throw new HttpError(401, 'token_revoked', 'Das Token wurde widerrufen.');
     if (agent.status === 'blocked') throw new HttpError(403, 'agent_blocked', 'Dieser Agent ist gesperrt.');
@@ -287,7 +294,7 @@ export function createApi(core: Core) {
     return [200, { id: threadId, subject: t.subject, participants: memberNames(threadId).map((m) => m.name), messages }] as const;
   };
 
-  return async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
+  async function handle(req: IncomingMessage, res: ServerResponse, url: URL) {
     try {
       const path = url.pathname.replace(/^\/api\/v1/, '');
       let body: Json = {};
@@ -303,26 +310,32 @@ export function createApi(core: Core) {
             throw new HttpError(400, 'json_invalid', 'Der Anfragetext muss ein JSON-Objekt sein.');
         }
       }
-      const c: Ctx = { req, res, url, body };
-      const route = `${req.method} ${path}`;
-      const thread = /^GET \/threads\/([\w-]+)$/.exec(route);
-      const result =
-        route === 'POST /register' ? register(c)
-        : route === 'POST /session' ? startSession(c)
-        : route === 'DELETE /session' ? endSession(c)
-        : route === 'GET /me' ? ([200, me(authenticate(req, { pending: true }))] as const)
-        : route === 'GET /agents' ? listAgents(c)
-        : route === 'POST /messages' ? sendMessage(c)
-        : route === 'GET /inbox' ? await inbox(c)
-        : route === 'POST /inbox/ack' ? ack(c)
-        : route === 'GET /threads' ? listThreads(c)
-        : thread ? getThread(c, thread[1])
-        : (() => { throw new HttpError(404, 'not_found', 'Diesen Endpunkt gibt es nicht.'); })();
+      const result = await invoke(`${req.method} ${path}`, { req, res, url, body });
       if (result) sendJson(res, result[0], result[1]);
     } catch (err) {
       if (err instanceof HttpError) return sendJson(res, err.status, { error: { code: err.code, message: err.message } });
       core.cfg.log?.(`Fehler: ${(err as Error).stack}`);
       sendJson(res, 500, { error: { code: 'internal', message: 'Interner Fehler des Hubs.' } });
     }
-  };
+  }
+
+  // Führt einen Endpunkt aus, z. B. "POST /messages". Wirft HttpError; null heißt: Verbindung schon weg.
+  async function invoke(route: string, c: Ctx): Promise<ApiResult> {
+    const thread = /^GET \/threads\/([\w-]+)$/.exec(route);
+      return (
+        route === 'POST /register' ? register(c)
+        : route === 'POST /session' ? startSession(c)
+        : route === 'DELETE /session' ? endSession(c)
+        : route === 'GET /me' ? ([200, me(authenticate(c.req, { pending: true }))] as const)
+        : route === 'GET /agents' ? listAgents(c)
+        : route === 'POST /messages' ? sendMessage(c)
+        : route === 'GET /inbox' ? await inbox(c)
+        : route === 'POST /inbox/ack' ? ack(c)
+        : route === 'GET /threads' ? listThreads(c)
+        : thread ? getThread(c, thread[1])
+        : (() => { throw new HttpError(404, 'not_found', 'Diesen Endpunkt gibt es nicht.'); })()
+      );
+  }
+
+  return { handle, invoke };
 }
