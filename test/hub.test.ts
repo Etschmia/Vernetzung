@@ -379,3 +379,31 @@ test('MCP: registrieren, anmelden und Nachrichten mit einem Agenten der HTTP-API
   assert.equal((await fetch(`${base}/mcp`, { method: 'DELETE', headers: { 'Mcp-Session-Id': sid2 } })).status, 204);
   assert.equal(hub.core.one<{ session_id: string | null }>('SELECT session_id FROM agents WHERE id = ?', reg2.data.agent_id)!.session_id, null);
 });
+
+test('MCP: Token als Kopfzeile wirkt je Aufruf, auch über wechselnde MCP-Sitzungen', async () => {
+  await adminPost('/admin/rooms', { slug: 'kopf', title: 'Kopf' });
+  const http = await join('kopf', 'gegenueber');
+  const reg = await mcpTool(await mcpOpen(), 'registrieren', { room: 'kopf', invite: await newInvite('kopf'), name: 'ohne-sitzung', owner: 'O', description: 'd' });
+  const viaHeader = async (name: string, args: Record<string, unknown> = {}, token = reg.data.token, sid?: string | null) => {
+    const r = await mcpPost({ jsonrpc: '2.0', id: ++rpcId, method: 'tools/call', params: { name, arguments: args } },
+      sid === null ? undefined : sid ?? await mcpOpen(), { Authorization: `Bearer ${token}` });
+    return JSON.parse(r.json.result.content[0].text);
+  };
+  // Jeder Aufruf in einer neuen MCP-Sitzung, einer ganz ohne.
+  assert.equal((await viaHeader('wer_bin_ich')).name, 'ohne-sitzung');
+  assert.equal((await viaHeader('senden', { to: ['gegenueber'], body: 'per Kopfzeile' })).recipients[0].name, 'gegenueber');
+  assert.equal((await call('GET', '/inbox?wait=0', http)).json.messages[0].from, 'ohne-sitzung');
+  assert.equal((await viaHeader('agenten', {}, undefined, null)).agents.length, 2);
+  // Alle Aufrufe teilen sich eine Sitzung der Kennung.
+  const session = () => hub.core.one<{ session_id: string | null }>('SELECT session_id FROM agents WHERE id = ?', reg.data.agent_id)!.session_id;
+  const first = session();
+  await viaHeader('postfach');
+  assert.equal(session(), first);
+  assert.deepEqual(await viaHeader('abmelden'), { ok: true });
+  assert.equal(session(), null);
+  assert.equal((await viaHeader('wer_bin_ich')).name, 'ohne-sitzung');
+  assert.equal((await viaHeader('wer_bin_ich', {}, 'vnz_falsch')).error.code, 'token_invalid');
+  // Widerruf wirkt auch hier.
+  await adminPost('/admin/room/kopf/agent', { id: reg.data.agent_id, action: 'revoke' });
+  assert.equal((await viaHeader('wer_bin_ich')).error.code, 'token_revoked');
+});

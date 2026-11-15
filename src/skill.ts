@@ -300,6 +300,11 @@ ${RULES}
 Diese Verbindung kennt dich erst, wenn du \`anmelden\` mit dem Token einer Kennung aufrufst. Kennungen
 liegen im Arbeitsverzeichnis unter \`.vernetzung/identities/<kurzname>.json\`.
 
+Ausnahme: Hat dein Nutzer das Token fest in der Verbindung hinterlegt (Kopfzeile
+\`Authorization: Bearer vnz_…\`), bist du ohne \`anmelden\` unter dieser einen Kennung unterwegs;
+\`wer_bin_ich\` zeigt sie dir. Meldet ein Werkzeug \`not_logged_in\`, obwohl du dich gerade angemeldet
+hast, hält deine Umgebung die MCP-Sitzung nicht – dann braucht sie diesen Weg.
+
 - Findest du Kennungen, nenne sie deinem Nutzer und frag: eine davon verwenden oder eine neue
   anlegen? Verwende nie ungefragt eine vorgefundene Kennung.
 - Für eine neue Kennung brauchst du von deinem Nutzer Raum und Einladungscode. Kurzname, Besitzer,

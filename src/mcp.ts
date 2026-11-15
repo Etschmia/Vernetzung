@@ -1,6 +1,7 @@
 // MCP-Fassade unter /mcp: dieselben Funktionen wie /api/v1, als Werkzeuge für MCP-Clients.
-// Transport: Streamable HTTP, Antworten als JSON. Die Kennung steht nicht in der MCP-Konfiguration,
-// sondern wird je MCP-Sitzung mit dem Werkzeug "anmelden" gebunden – siehe docs/PROTOKOLL.md.
+// Transport: Streamable HTTP, Antworten als JSON. Zwei Wege zur Kennung – siehe docs/PROTOKOLL.md:
+// je MCP-Sitzung mit dem Werkzeug "anmelden" gebunden, oder je Aufruf als Bearer-Token im Kopf
+// (für Clients, die jede Anfrage in einer neuen MCP-Sitzung stellen).
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { HttpError, newId, readBody, sha256 } from './core.ts';
 import type { Core } from './core.ts';
@@ -32,7 +33,7 @@ const TOOLS = [
       room_password: { ...text, description: 'Raumpasswort, falls der Raum eines hat' },
     }, ['room', 'name', 'owner', 'description']),
   tool('anmelden',
-    'Bindet diese MCP-Sitzung an eine Kennung. Nötig vor allen anderen Werkzeugen außer "registrieren". Bei identity_in_use den Nutzer fragen, bevor takeover gesetzt wird.',
+    'Bindet diese MCP-Sitzung an eine Kennung. Nötig vor allen anderen Werkzeugen außer "registrieren" – es sei denn, die Verbindung schickt das Token schon als Authorization-Kopfzeile mit; dann entfällt die Anmeldung. Bei identity_in_use den Nutzer fragen, bevor takeover gesetzt wird.',
     {
       token: { ...text, description: 'Token der Kennung (vnz_…) aus der Kennungsdatei' },
       takeover: { type: 'boolean', description: 'true löst eine andere aktive Sitzung derselben Kennung ab' },
@@ -65,14 +66,15 @@ export function createMcp(core: Core, invoke: Invoke) {
   const { one, run } = core;
 
   const binding = (sid: string) => one<Binding>('SELECT agent_id, session_id FROM mcp_sessions WHERE sid_hash = ?', sha256(sid));
-  const unbind = (sid: string) => run('DELETE FROM mcp_sessions WHERE sid_hash = ?', sha256(sid));
+  const unbind = (sid: string | undefined) => sid && run('DELETE FROM mcp_sessions WHERE sid_hash = ?', sha256(sid));
 
-  const callTool = async (name: string, args: Json, sid: string, res: ServerResponse): Promise<unknown> => {
+  const callTool = async (name: string, args: Json, sid: string | undefined, bearer: string | undefined, res: ServerResponse): Promise<unknown> => {
     const api = (route: string, req: Caller, body: Json = {}) =>
       invoke(route.split('?')[0], { req, res, url: new URL(route.split(' ')[1], 'http://hub'), body });
 
     if (name === 'registrieren') return (await api('POST /register', { headers: {} }, args))?.[1];
     if (name === 'anmelden') {
+      if (!sid) throw new HttpError(400, 'session_required', 'Die Kopfzeile Mcp-Session-Id fehlt.');
       if (typeof args.token !== 'string') throw new HttpError(400, 'field_missing', 'Feld "token" fehlt.');
       const result = await api('POST /session', { headers: { authorization: `Bearer ${args.token}` } }, args);
       const { session, ...rest } = result![1] as { session: string; agent: { agent_id: string } };
@@ -82,9 +84,20 @@ export function createMcp(core: Core, invoke: Invoke) {
       return rest;
     }
 
-    const bound = binding(sid);
-    if (!bound) throw new HttpError(401, 'not_logged_in', 'Diese MCP-Sitzung ist an keine Kennung gebunden. Erst "anmelden" aufrufen.');
-    const me: Caller = { headers: { 'x-vernetzung-session': bound.session_id }, agentId: bound.agent_id };
+    let me: Caller;
+    if (bearer) {
+      // Token je Aufruf: Der Aufruf nutzt die laufende Sitzung der Kennung mit oder beginnt eine, wenn es keine gibt.
+      const authorization = `Bearer ${bearer}`;
+      const agent = one<{ id: string; session_id: string | null }>('SELECT id, session_id FROM agents WHERE token_hash = ?', sha256(bearer));
+      if (!agent) throw new HttpError(401, 'token_invalid', 'Das Token ist unbekannt.');
+      const session = agent.session_id
+        ?? ((await api('POST /session', { headers: { authorization } }))![1] as { session: string }).session;
+      me = { headers: { 'x-vernetzung-session': session }, agentId: agent.id };
+    } else {
+      const bound = sid ? binding(sid) : undefined;
+      if (!bound) throw new HttpError(401, 'not_logged_in', 'Diese MCP-Sitzung ist an keine Kennung gebunden. Erst "anmelden" aufrufen.');
+      me = { headers: { 'x-vernetzung-session': bound.session_id }, agentId: bound.agent_id };
+    }
     const query = new URLSearchParams();
     for (const key of ['wait', 'every']) if (args[key] != null) query.set(key, String(args[key]));
     const route =
@@ -110,7 +123,7 @@ export function createMcp(core: Core, invoke: Invoke) {
   };
 
   // Beantwortet eine JSON-RPC-Nachricht. undefined heißt: Benachrichtigung, keine Antwort.
-  const answer = async (msg: Json, sid: string | undefined, res: ServerResponse, hub: string, headers: Record<string, string>) => {
+  const answer = async (msg: Json, sid: string | undefined, bearer: string | undefined, res: ServerResponse, hub: string, headers: Record<string, string>) => {
     const id = msg.id;
     const ok = (result: unknown) => ({ jsonrpc: '2.0', id, result });
     const fail = (code: number, message: string) => ({ jsonrpc: '2.0', id: id ?? null, error: { code, message } });
@@ -129,14 +142,14 @@ export function createMcp(core: Core, invoke: Invoke) {
       });
     }
     if (msg.method === 'ping') return ok({});
-    if (!sid) return fail(-32600, 'Die Kopfzeile Mcp-Session-Id fehlt. Erst "initialize" aufrufen.');
+    if (!sid && !bearer) return fail(-32600, 'Die Kopfzeile Mcp-Session-Id fehlt. Erst "initialize" aufrufen.');
     if (msg.method === 'tools/list') return ok({ tools: TOOLS });
     if (msg.method === 'tools/call') {
       const name = String(params.name);
       if (!TOOLS.some((t) => t.name === name)) return fail(-32602, `Unbekanntes Werkzeug: ${name}`);
       const args = (params.arguments ?? {}) as Json;
       try {
-        const result = await callTool(name, args, sid, res);
+        const result = await callTool(name, args, sid, bearer, res);
         if (result === undefined) return undefined; // Verbindung während des Wartens beendet
         return ok({ content: [{ type: 'text', text: JSON.stringify(result) }] });
       } catch (err) {
@@ -163,6 +176,9 @@ export function createMcp(core: Core, invoke: Invoke) {
       const sid = typeof sidHeader === 'string' ? sidHeader : undefined;
       if (sid && !SID_RE.test(sid)) return send(404, { error: 'Unbekannte MCP-Sitzung.' });
 
+      const auth = req.headers.authorization ?? '';
+      const bearer = auth.startsWith('Bearer ') ? auth.slice(7).trim() || undefined : undefined;
+
       if (req.method === 'DELETE') {
         const bound = sid && binding(sid);
         if (sid && bound) {
@@ -187,7 +203,7 @@ export function createMcp(core: Core, invoke: Invoke) {
       const headers: Record<string, string> = {};
       const answers = [];
       for (const msg of messages) {
-        const a = await answer(msg !== null && typeof msg === 'object' ? msg : {}, sid, res, core.baseUrl(req), headers);
+        const a = await answer(msg !== null && typeof msg === 'object' ? msg : {}, sid, bearer, res, core.baseUrl(req), headers);
         if (a) answers.push(a);
       }
       if (answers.length === 0) return send(202);
