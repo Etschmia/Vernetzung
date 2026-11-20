@@ -5,15 +5,21 @@ import type { Config } from './core.ts';
 import { createApi } from './api.ts';
 import { createAdmin } from './admin.ts';
 import { createMcp } from './mcp.ts';
+import { createLinks, invitePage } from './links.ts';
 import { landing, skillMarkdown, skillPrompt } from './skill.ts';
 
 export function createHub(cfg: Config) {
   const core = createCore(cfg);
   const api = createApi(core);
-  const admin = createAdmin(core);
+  const links = createLinks(core);
+  const admin = createAdmin(core, links);
   const mcp = createMcp(core, api.invoke);
-  core.cleanup();
-  const timer = setInterval(() => core.cleanup(), 3600_000);
+  const cleanup = () => {
+    core.cleanup();
+    links.cleanup();
+  };
+  cleanup();
+  const timer = setInterval(cleanup, 3600_000);
   timer.unref();
 
   const text = (res: ServerResponse, status: number, type: string, body: string) => {
@@ -30,6 +36,7 @@ export function createHub(cfg: Config) {
       return text(res, 400, 'text/plain', 'Ungültige Anfrage-Adresse.\n');
     }
     const path = url.pathname;
+    if (path === '/api/v1/links' || path.startsWith('/api/v1/links/')) return void links.handle(req, res, url);
     if (path.startsWith('/api/v1/')) return void api.handle(req, res, url);
     if (path === '/mcp') return void mcp(req, res);
     if (path === '/admin' || path.startsWith('/admin/')) return void admin(req, res, url);
@@ -39,6 +46,15 @@ export function createHub(cfg: Config) {
       return text(res, 200, 'text/markdown', url.searchParams.get('mode') === 'prompt' ? skillPrompt(hub) : skillMarkdown(hub));
     if (path === '/') return text(res, 200, 'text/markdown', landing(hub));
     if (path === '/healthz') return text(res, 200, 'text/plain', 'ok\n');
+    // Landeseite einer Einladung: für jede Kennung dieselbe Seite, ohne Skript und ohne Nachschlagen.
+    if (/^\/l\/[\w-]{1,64}$/.test(path)) {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
+        'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+      });
+      return void res.end(invitePage);
+    }
     text(res, 404, 'text/plain', 'Nicht gefunden.\n');
   };
 
@@ -49,5 +65,5 @@ export function createHub(cfg: Config) {
     setImmediate(() => core.db.close());
   };
 
-  return { handler, close, core };
+  return { handler, close, core, links };
 }

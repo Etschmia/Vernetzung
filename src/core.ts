@@ -98,6 +98,26 @@ CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id, seq);
 CREATE TABLE IF NOT EXISTS deliveries (
   message_seq INTEGER NOT NULL REFERENCES messages(seq), agent_id TEXT NOT NULL REFERENCES agents(id),
   acked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (agent_id, message_seq));
+-- Verbindungen (docs/PROTOKOLL-VERBINDUNGEN.md): getrennt von Räumen und Agenten. Der Hub kennt
+-- weder Namen noch Inhalte, nur Plätze (Token-Hashes) und Chiffrat.
+CREATE TABLE IF NOT EXISTS link_keys (
+  id TEXT PRIMARY KEY, label TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE,
+  links_max INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS links (
+  id TEXT PRIMARY KEY, key_id TEXT NOT NULL REFERENCES link_keys(id), seats INTEGER NOT NULL,
+  rev INTEGER NOT NULL DEFAULT 1, seq INTEGER NOT NULL DEFAULT 0,
+  join_hash TEXT, invite_by TEXT, invite_expires_at INTEGER,
+  created_at INTEGER NOT NULL, last_activity INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS link_members (
+  id TEXT PRIMARY KEY, link_id TEXT NOT NULL REFERENCES links(id), token_hash TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL, reason TEXT, hello TEXT, welcome TEXT,
+  joined_seq INTEGER NOT NULL DEFAULT 0, acked_seq INTEGER NOT NULL DEFAULT 0,
+  lost_from INTEGER, lost_to INTEGER,
+  last_poll INTEGER, created_at INTEGER NOT NULL, changed_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS link_members_link ON link_members(link_id);
+CREATE TABLE IF NOT EXISTS link_messages (
+  link_id TEXT NOT NULL REFERENCES links(id), seq INTEGER NOT NULL, from_member TEXT NOT NULL,
+  box TEXT NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY (link_id, seq));
 `;
 
 export type Core = ReturnType<typeof createCore>;
@@ -174,7 +194,18 @@ export function createCore(cfg: Config) {
     return `${proto}://${req.headers.host ?? 'localhost'}`;
   };
 
-  return { db, cfg, all, one, run, tx, waiters, wake, presence, setting, setSetting, retentionDays, cleanup, baseUrl };
+  // X-Forwarded-For zählt nur, wenn die Anfrage von einem bekannten Proxy kommt (derselbe Rechner oder Konfiguration).
+  const clientAddress = (req: IncomingMessage): string => {
+    const peer = (req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
+    const trusted = peer === '127.0.0.1' || peer === '::1' || (cfg.trustedProxies ?? []).includes(peer);
+    const forwarded = String(req.headers['x-forwarded-for'] ?? '').split(',').map((x) => x.trim()).filter(Boolean).pop();
+    return trusted && forwarded ? forwarded : peer;
+  };
+
+  return {
+    db, cfg, all, one, run, tx, waiters, wake, presence, setting, setSetting, retentionDays, cleanup, baseUrl,
+    clientAddress,
+  };
 }
 
 export async function readBody(req: IncomingMessage): Promise<string> {
@@ -186,6 +217,21 @@ export async function readBody(req: IncomingMessage): Promise<string> {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf8');
+}
+
+// Liest den Rumpf als JSON-Objekt; ein leerer Rumpf ergibt {}.
+export async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const raw = await readBody(req);
+  if (!raw.trim()) return {};
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    throw new HttpError(400, 'json_invalid', 'Der Anfragetext ist kein gültiges JSON.');
+  }
+  if (body === null || typeof body !== 'object' || Array.isArray(body))
+    throw new HttpError(400, 'json_invalid', 'Der Anfragetext muss ein JSON-Objekt sein.');
+  return body as Record<string, unknown>;
 }
 
 export function sendJson(res: ServerResponse, status: number, body: unknown) {

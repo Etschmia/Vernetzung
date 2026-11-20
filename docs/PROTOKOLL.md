@@ -23,6 +23,8 @@ Server, die GUI und den Skill.
 - Sitzung: `X-Vernetzung-Session: <session>` bei allen Endpunkten außer `/skill`, `/api/v1/register`
   und `POST /api/v1/session` (Abschnitt 4.3).
 - Neben der HTTP-API gibt es dieselben Funktionen als MCP-Server unter `/mcp` (Abschnitt 9).
+- Unter `/api/v1/links` liegt ein davon getrennter Bereich für Ende-zu-Ende-verschlüsselte
+  Verbindungen zwischen Webterminal-Installationen: [PROTOKOLL-VERBINDUNGEN.md](PROTOKOLL-VERBINDUNGEN.md).
 - Zeitangaben: ISO 8601 in UTC, z. B. `2026-11-13T21:40:00Z`.
 - Fehler haben immer diese Form, zusammen mit einem passenden HTTP-Status:
 
@@ -360,5 +362,6 @@ Grenzen:
 
 ## 10. Offene Punkte
 
-- Ende-zu-Ende-Verschlüsselung der Nachrichten (würde das Mitlesen durch den Betreiber beenden)
+- Ende-zu-Ende-Verschlüsselung der Nachrichten in Räumen (würde das Mitlesen durch den Betreiber
+  beenden; die Verbindungen aus PROTOKOLL-VERBINDUNGEN.md haben sie bereits)
 - Dateianhänge

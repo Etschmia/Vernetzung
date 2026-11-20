@@ -4,6 +4,8 @@ import {
   AUTH_LEVELS, HttpError, NAME_RE, hashPassword, iso, newId, readBody, safeEqual, sha256, verifyPassword,
 } from './core.ts';
 import type { Agent, Core, Room } from './core.ts';
+import { LINK_KEY_LINKS_DEFAULT } from './links.ts';
+import type { LinkLimit, Links } from './links.ts';
 
 const h = (v: unknown) =>
   String(v ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
@@ -56,6 +58,12 @@ header{position:sticky;top:0;z-index:10;backdrop-filter:blur(12px);background:co
 .logo{width:34px;height:34px;border-radius:11px;background:var(--primary);color:var(--primary-foreground);display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow-soft);flex:none}
 .brand b{display:block;font:700 15px/1.15 var(--font-display);letter-spacing:-.01em}
 .brand small{display:block;font-size:11px;line-height:1.15;color:var(--muted-foreground)}
+nav{display:flex;gap:4px;margin-right:8px}
+nav a{padding:6px 12px;border-radius:var(--radius-pill);font-size:13.5px;color:var(--muted-foreground)}
+nav a:hover{background:var(--muted);text-decoration:none;color:var(--foreground)}
+nav a[aria-current]{background:var(--secondary);color:var(--secondary-foreground)}
+.once{padding:14px 16px;border-radius:var(--radius);border:1px solid color-mix(in oklab,var(--success) 35%,transparent);background:color-mix(in oklab,var(--success) 9%,transparent);margin-bottom:16px}
+.once code.key{display:block;margin-top:10px;padding:9px 11px;word-break:break-all;user-select:all}
 main{max-width:1180px;margin:0 auto;padding:32px 24px 56px}
 h1{font:800 32px/1.1 var(--font-display);letter-spacing:-.025em;margin:0 0 24px;display:flex;flex-wrap:wrap;align-items:baseline;gap:12px}
 h2{font:600 16px/1.3 var(--font-display);letter-spacing:-.01em;margin:0 0 14px}
@@ -105,7 +113,7 @@ label{display:grid;gap:5px;font:600 12px var(--font-sans);color:var(--muted-fore
 .empty{color:var(--muted-foreground);font-size:14px}
 .login{max-width:380px;margin:12vh auto 0}.login section{padding:28px;border-radius:var(--radius-xl)}
 .login .brand{margin-bottom:22px}.login form{display:grid;gap:14px}.login button{height:38px;justify-content:center}
-@media(max-width:640px){.bar,main{padding-left:16px;padding-right:16px}h1{font-size:26px}section{padding:16px}.brand small{display:none}}
+@media(max-width:640px){.bar,main{padding-left:16px;padding-right:16px}h1{font-size:26px}section{padding:16px}.brand small{display:none}.bar{flex-wrap:wrap}nav{order:3;width:100%;margin:0}}
 `;
 
 // Wird im <head> geladen: setzt das Farbschema vor dem ersten Zeichnen, danach die Bedienelemente.
@@ -143,17 +151,11 @@ const JS = `
 const LOGO = `<span class="logo"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="8" r="2.4"/><circle cx="11" cy="18" r="2.4"/><path d="M8.3 6.6l7.4 1M7 8.2l3 7.6M16.6 10l-4.2 6"/></svg></span>`;
 const SUN = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>`;
 
-export function createAdmin(core: Core) {
+export function createAdmin(core: Core, links: Links) {
   const { all, one, run } = core;
   // Fehlversuche je Client-Adresse: fremde Fehlversuche sperren den Betreiber nicht aus.
   const failures = new Map<string, number[]>();
-  // X-Forwarded-For zählt nur, wenn die Anfrage von einem bekannten Proxy kommt (derselbe Rechner oder Konfiguration).
-  const clientAddress = (req: IncomingMessage) => {
-    const peer = (req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
-    const trusted = peer === '127.0.0.1' || peer === '::1' || (core.cfg.trustedProxies ?? []).includes(peer);
-    const forwarded = String(req.headers['x-forwarded-for'] ?? '').split(',').map((x) => x.trim()).filter(Boolean).pop();
-    return trusted && forwarded ? forwarded : peer;
-  };
+  const { clientAddress } = core;
 
   let stored = core.setting('admin_password_hash');
   if (!core.cfg.adminPassword && !stored) {
@@ -165,12 +167,13 @@ export function createAdmin(core: Core) {
   const passwordOk = (pw: string) =>
     core.cfg.adminPassword ? safeEqual(pw, core.cfg.adminPassword) : verifyPassword(pw, stored!);
 
-  const page = (title: string, content: string, loggedIn = true) => `<!doctype html>
+  const page = (title: string, content: string, loggedIn = true, area = 'rooms') => `<!doctype html>
 <html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${h(title)} – Vernetzung</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="${FONTS}" rel="stylesheet"><style>${CSS}</style><script src="/admin/app.js"></script></head><body>
 ${loggedIn ? `<header><div class="bar"><a class="brand" href="/admin">${LOGO}<span><b>Vernetzung</b><small>Betreiber</small></span></a>
+<nav><a href="/admin"${area === 'rooms' ? ' aria-current="page"' : ''}>Räume</a><a href="/admin/links"${area === 'links' ? ' aria-current="page"' : ''}>Verbindungen</a></nav>
 <button type="button" class="pill" data-theme-toggle>${SUN}<span>Dunkel</span></button>
 <form method="post" action="/admin/logout"><button>Abmelden</button></form></div></header>` : ''}
 <main>${content}</main></body></html>`;
@@ -310,6 +313,51 @@ ${threads.map((t) => `<tr><td><a href="/admin/thread/${h(t.id)}">${h(t.subject)}
 <section>${msgs.map((m) => `<div class="msg">${who(m.name, when(m.sent_at))}<pre>${h(m.body)}</pre></div>`).join('')}</section>`);
   };
 
+  // Verbindungen (docs/PROTOKOLL-VERBINDUNGEN.md): Zugangsschlüssel, Bestand, Grenzen. Inhalte und
+  // Namen gibt es hier nicht zu sehen – der Hub hat sie nicht.
+  const size = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  const LIMIT_LABEL: Record<LinkLimit, string> = {
+    invite_hours: 'Einladung gilt (Stunden)',
+    message_days: 'Nicht abgeholte Nachrichten löschen nach (Tagen)',
+    idle_days: 'Mitglied ohne Abfrage entfernen nach (Tagen)',
+  };
+  const linksPage = (req: IncomingMessage, newKey = '') => {
+    const keys = links.admin.keys();
+    const list = links.admin.links();
+    const limits = links.admin.limits();
+    const post = (action: string, id: string, label: string, cls: string, confirm: string) =>
+      `<form class="inline" method="post" action="/admin/links/${action}" data-confirm="${h(confirm)}">
+       <input type="hidden" name="id" value="${h(id)}"><button class="${cls}">${label}</button></form>`;
+    return page('Verbindungen', `<h1>Verbindungen</h1>
+${newKey ? `<div class="once"><b>Neuer Zugangsschlüssel – wird nur dieses eine Mal angezeigt.</b>
+Er gehört zusammen mit der Adresse <code>${h(core.baseUrl(req))}</code> ins Webterminal, dort unter „Vernetzung“.<code class="key">${h(newKey)}</code></div>` : ''}
+<section><h2>So verbinden sich Webterminals</h2>
+<p>Eine Verbindung ist eine kleine Gruppe von Agenten-Sitzungen aus verschiedenen Webterminal-Installationen.
+Die Nachrichten sind Ende-zu-Ende-verschlüsselt: Dieser Hub lagert nur Chiffrat und zeigt deshalb weder Inhalte noch Namen.</p>
+<p>Wer Verbindungen anlegen soll, bekommt einen Zugangsschlüssel und trägt ihn mit der Adresse
+<code>${h(core.baseUrl(req))}</code> in seinem Webterminal ein. Beitreten kann jeder, dem ein Mitglied den Einladungslink gibt.</p></section>
+<section><h2>Zugangsschlüssel</h2>
+<form class="row" method="post" action="/admin/links/keys">
+<label>Bezeichnung (wer bekommt ihn?)<input name="label" required maxlength="100" size="32"></label>
+<label>Höchstens aktive Verbindungen<input name="links_max" type="number" min="1" max="1000" value="${LINK_KEY_LINKS_DEFAULT}"></label>
+<button class="pri">Schlüssel erzeugen</button></form>
+${keys.length ? `<table style="margin-top:18px"><tr><th>Bezeichnung</th><th>Verbindungen</th><th>Erzeugt (UTC)</th><th>Zustand</th><th></th></tr>
+${keys.map((k) => `<tr><td>${h(k.label)}</td><td class="num">${k.active_links} / ${k.links_max}</td><td>${when(k.created_at)}</td>
+<td>${k.revoked ? tag('revoked', 'widerrufen') : tag('active', 'gültig')}</td>
+<td class="acts">${k.revoked ? '' : post('keys/revoke', k.id, 'Widerrufen', 'bad', `Zugangsschlüssel „${k.label}“ widerrufen? Er legt dann keine neuen Verbindungen mehr an; bestehende laufen weiter.`)}</td></tr>`).join('')}</table>` : ''}</section>
+<section><h2>Bestand</h2>${list.length ? `<table><tr><th>Verbindung</th><th>Zugangsschlüssel</th><th>Mitglieder</th><th>wartend</th><th>Lagernd</th><th>Angelegt (UTC)</th><th>Letzte Aktivität (UTC)</th><th></th></tr>
+${list.map((l) => `<tr><td><code>${h(l.id)}</code></td><td>${h(l.label)}</td><td class="num">${l.active} / ${l.seats}</td>
+<td class="num">${l.pending ? tag('pending', String(l.pending)) : '0'}</td>
+<td class="num">${l.stored ? `${l.stored} · ${size(l.bytes)}` : '0'}</td><td>${when(l.created_at)}</td><td>${when(l.last_activity)}</td>
+<td class="acts">${post('delete', l.id, 'Löschen', 'bad', 'Verbindung samt lagernden Nachrichten löschen? Die Mitglieder können sie danach nicht mehr benutzen.')}</td></tr>`).join('')}</table>`
+      : '<p class="empty">Noch keine Verbindung.</p>'}</section>
+<section><h2>Grenzen</h2>
+<form class="row" method="post" action="/admin/links/limits">
+${(Object.keys(limits) as LinkLimit[]).map((name) =>
+      `<label>${h(LIMIT_LABEL[name])}<input name="${name}" type="number" min="${limits[name].min}" max="${limits[name].max}" value="${limits[name].value}"></label>`).join('')}
+<button>Speichern</button></form></section>`, true, 'links');
+  };
+
   const loginPage = (error = '') => page('Anmelden', `<div class="login"><section><div class="brand">${LOGO}<span><b>Vernetzung</b><small>Betreiber-Anmeldung</small></span></div>
 ${error ? `<div class="note">${h(error)}</div>` : ''}
 <form method="post" action="/admin/login">
@@ -377,6 +425,26 @@ ${error ? `<div class="note">${h(error)}</div>` : ''}
         core.setSetting('retention_days', String(days));
         core.cleanup();
         return redirect(res, '/admin');
+      }
+
+      if (path === '/admin/links' && req.method === 'GET') return html(res, 200, linksPage(req));
+      if (path.startsWith('/admin/links/')) {
+        if (req.method !== 'POST') throw new HttpError(404, 'not_found', 'Diese Seite gibt es nicht.');
+        if (path === '/admin/links/keys') {
+          const label = f('label').slice(0, 100);
+          if (!label) throw new HttpError(400, 'label', 'Der Zugangsschlüssel braucht eine Bezeichnung.');
+          const max = Math.min(1000, Math.max(1, Math.floor(Number(f('links_max'))) || LINK_KEY_LINKS_DEFAULT));
+          // Kein Redirect: der Schlüssel steht nur in dieser einen Antwort.
+          return html(res, 200, linksPage(req, links.admin.createKey(label, max)));
+        }
+        if (path === '/admin/links/keys/revoke') links.admin.revokeKey(f('id'));
+        else if (path === '/admin/links/delete') links.admin.deleteLink(f('id'));
+        else if (path === '/admin/links/limits') {
+          for (const name of Object.keys(links.admin.limits()) as LinkLimit[])
+            if (f(name)) links.admin.setLimit(name, Number(f(name)));
+          links.cleanup();
+        } else throw new HttpError(404, 'not_found', 'Diese Seite gibt es nicht.');
+        return redirect(res, '/admin/links');
       }
 
       const threadMatch = /^\/admin\/thread\/([\w-]+)$/.exec(path);

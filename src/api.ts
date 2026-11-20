@@ -2,7 +2,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   HttpError, MAX_BODY_BYTES, MAX_THREAD_MEMBERS, NAME_RE, SEND_LIMIT_PER_MINUTE, SESSION_BUSY_MS,
-  iso, newId, readBody, sendJson, sha256, verifyPassword,
+  iso, newId, readJson, sendJson, sha256, verifyPassword,
 } from './core.ts';
 import type { Agent, Core, Room } from './core.ts';
 
@@ -297,19 +297,7 @@ export function createApi(core: Core) {
   async function handle(req: IncomingMessage, res: ServerResponse, url: URL) {
     try {
       const path = url.pathname.replace(/^\/api\/v1/, '');
-      let body: Json = {};
-      if (req.method === 'POST' || req.method === 'DELETE') {
-        const raw = await readBody(req);
-        if (raw.trim()) {
-          try {
-            body = JSON.parse(raw);
-          } catch {
-            throw new HttpError(400, 'json_invalid', 'Der Anfragetext ist kein gültiges JSON.');
-          }
-          if (body === null || typeof body !== 'object' || Array.isArray(body))
-            throw new HttpError(400, 'json_invalid', 'Der Anfragetext muss ein JSON-Objekt sein.');
-        }
-      }
+      const body: Json = req.method === 'POST' || req.method === 'DELETE' ? await readJson(req) : {};
       const result = await invoke(`${req.method} ${path}`, { req, res, url, body });
       if (result) sendJson(res, result[0], result[1]);
     } catch (err) {
