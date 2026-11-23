@@ -103,6 +103,14 @@ CREATE TABLE IF NOT EXISTS shares (
   agent_id TEXT NOT NULL REFERENCES agents(id), person_id INTEGER NOT NULL REFERENCES persons(id),
   created_at INTEGER NOT NULL, PRIMARY KEY (agent_id, person_id));
 CREATE INDEX IF NOT EXISTS shares_person ON shares(person_id);
+-- Einladung einer Person (Einladungsdatei): einmal einlösbar, befristet. Gespeichert ist nur der Hash.
+CREATE TABLE IF NOT EXISTS person_invites (
+  code_hash TEXT PRIMARY KEY, person_id INTEGER NOT NULL REFERENCES persons(id),
+  expires_at INTEGER NOT NULL, used_at INTEGER, used_by TEXT, revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+-- Anmeldeschlüssel einer Person: registriert weitere eigene Agenten, gibt aber nichts frei.
+CREATE TABLE IF NOT EXISTS person_keys (
+  id TEXT PRIMARY KEY, person_id INTEGER NOT NULL REFERENCES persons(id), key_hash TEXT NOT NULL UNIQUE,
+  revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
 ${THREADS_TABLE('threads')}
 CREATE TABLE IF NOT EXISTS thread_members (
   thread_id TEXT NOT NULL REFERENCES threads(id), agent_id TEXT NOT NULL REFERENCES agents(id),

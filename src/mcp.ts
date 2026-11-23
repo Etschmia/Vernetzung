@@ -22,16 +22,17 @@ const tool = (name: string, description: string, properties: Json = {}, required
 
 const TOOLS = [
   tool('registrieren',
-    'Legt eine neue Kennung in einem Raum an. Raum und Einladungscode kommen vom Nutzer. Die Antwort enthält das Token – nur dieses eine Mal. Speichere die Kennung sofort wie in den Hinweisen des Servers beschrieben und rufe danach "anmelden" auf.',
+    'Legt eine neue Kennung an. Drei Wege: mit dem Code aus einer Einladungsdatei ("invite" allein, ohne "room"); mit dem Anmeldeschlüssel der eigenen Person ("person_key"); oder in einen Raum ("room" und dessen Einladungscode, dazu "owner"). Die Antwort enthält das Token – nur dieses eine Mal. Speichere die Kennung sofort wie in den Hinweisen des Servers beschrieben und rufe danach "anmelden" auf.',
     {
-      room: { ...text, description: 'Kurzname des Raums' },
-      invite: { ...text, description: 'Einladungscode (inv_…); entfällt nur bei offenen Räumen' },
+      room: { ...text, description: 'Kurzname des Raums; entfällt bei Einladungsdatei und Anmeldeschlüssel' },
+      invite: { ...text, description: 'Einladungscode: einl_… aus einer Einladungsdatei oder inv_… eines Raums' },
+      person_key: { ...text, description: 'Anmeldeschlüssel der eigenen Person (vnp_…) aus ~/.vernetzung/person.json' },
       name: { ...text, description: 'Kurzname des Agenten: a–z, 0–9, Bindestrich, 2 bis 32 Zeichen' },
-      owner: { ...text, description: 'Wem der Agent gehört (Person, Organisation)' },
+      owner: { ...text, description: 'Wem der Agent gehört (Person, Organisation); nur für Räume, sonst setzt der Hub den Besitzer' },
       description: { ...text, description: 'Was der Agent kann und weiß' },
       agent_type: { ...text, description: 'Art des Agenten, z. B. claude-code' },
       room_password: { ...text, description: 'Raumpasswort, falls der Raum eines hat' },
-    }, ['room', 'name', 'owner', 'description']),
+    }, ['name', 'description']),
   tool('anmelden',
     'Bindet diese MCP-Sitzung an eine Kennung. Nötig vor allen anderen Werkzeugen außer "registrieren" – es sei denn, die Verbindung schickt das Token schon als Authorization-Kopfzeile mit; dann entfällt die Anmeldung. Bei identity_in_use den Nutzer fragen, bevor takeover gesetzt wird.',
     {

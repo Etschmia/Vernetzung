@@ -89,14 +89,18 @@ export function createApi(core: Core) {
     return agent;
   };
 
+  // Drei Wege zur Kennung: in einen Raum (Einladungscode des Raums), als Agent einer Person mit
+  // deren Einladung (Einladungsdatei, einmal einlösbar) oder mit dem Anmeldeschlüssel der Person.
   const register = (c: Ctx) => {
-    const roomSlug = str(c.body.room, 'room', 64);
+    const viaPerson = (c.body.room == null || c.body.room === '') && (c.body.invite != null || c.body.person_key != null);
+    const roomSlug = viaPerson ? '' : str(c.body.room, 'room', 64);
     const name = str(c.body.name, 'name', 32);
-    const owner = str(c.body.owner, 'owner', 200);
     const description = str(c.body.description, 'description', 1000);
     const agentType = str(c.body.agent_type, 'agent_type', 50, false) || 'unbekannt';
     if (!NAME_RE.test(name))
       throw new HttpError(400, 'name_invalid', 'Der Kurzname darf nur a–z, 0–9 und Bindestrich enthalten, 2 bis 32 Zeichen.');
+    if (viaPerson) return registerForPerson(c, name, description, agentType);
+    const owner = str(c.body.owner, 'owner', 200);
     const room = one<Room>('SELECT * FROM rooms WHERE slug = ?', roomSlug);
     if (!room) throw new HttpError(404, 'room_not_found', 'Diesen Raum gibt es nicht.');
     checkRoomPassword(room, c.body.room_password);
@@ -122,6 +126,39 @@ export function createApi(core: Core) {
         id, room.id, name, owner, description, agentType, sha256(token), status, Date.now());
     });
     return [201, { agent_id: id, room: room.slug, name, token, status }] as const;
+  };
+
+  const registerForPerson = (c: Ctx, name: string, description: string, agentType: string) => {
+    const token = newId('vnz_', 32);
+    const id = newId('ag_');
+    const person = tx(() => {
+      let personId: number;
+      if (c.body.person_key != null) {
+        const key = one<{ person_id: number; revoked: number }>(
+          'SELECT person_id, revoked FROM person_keys WHERE key_hash = ?', sha256(str(c.body.person_key, 'person_key', 100)));
+        if (!key || key.revoked) throw new HttpError(403, 'person_key_invalid', 'Der Anmeldeschlüssel ist unbekannt oder widerrufen.');
+        personId = key.person_id;
+      } else {
+        const hash = sha256(str(c.body.invite, 'invite', 100));
+        const inv = one<{ person_id: number; expires_at: number; used_at: number | null; revoked: number }>(
+          'SELECT * FROM person_invites WHERE code_hash = ?', hash);
+        if (!inv || inv.revoked || inv.expires_at < Date.now())
+          throw new HttpError(403, 'invite_invalid', 'Der Einladungscode ist ungültig oder abgelaufen.');
+        if (inv.used_at != null)
+          throw new HttpError(403, 'invite_exhausted', 'Der Einladungscode wurde bereits vollständig eingelöst.');
+        run('UPDATE person_invites SET used_at = ?, used_by = ? WHERE code_hash = ?', Date.now(), id, hash);
+        personId = inv.person_id;
+      }
+      const p = one<Person>('SELECT * FROM persons WHERE id = ?', personId)!;
+      if (one("SELECT 1 FROM agents WHERE person_id = ? AND name = ? AND status != 'revoked'", p.id, name))
+        throw new HttpError(409, 'name_taken', 'Diesen Kurznamen trägt schon ein Agent dieser Person.');
+      // Der Besitzer ist die Person, wie der Betreiber sie angelegt hat – nicht, was der Agent angibt.
+      run(`INSERT INTO agents (id, person_id, name, owner, description, agent_type, token_hash, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
+        id, p.id, name, p.name, description, agentType, sha256(token), Date.now());
+      return p;
+    });
+    return [201, { agent_id: id, room: null, person: person.slug, name, owner: person.name, token, status: 'active' }] as const;
   };
 
   const unreadCount = (agentId: string) =>

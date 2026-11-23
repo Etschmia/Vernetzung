@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join as joinPath } from 'node:path';
 import { createHub } from '../src/hub.ts';
@@ -273,4 +273,156 @@ test('Migration: eine Datenbank im alten Schema läuft weiter, Tokens, Sitzung u
   again.close();
   await new Promise((r) => setTimeout(r, 50));
   rmSync(dir, { recursive: true, force: true });
+});
+
+// ---- Einladungsdatei und Anmeldeschlüssel ----
+
+const invitation = async (slug: string, days = '7') => {
+  const r = await adminPost(`/admin/person/${slug}/invite`, { days, from: 'Tobias Brendler' });
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get('content-disposition') ?? '', new RegExp(`attachment; filename="vernetzung-einladung-${slug}\\.md"`));
+  return r.text();
+};
+// Was ein Agent ohne Vorwissen der Datei entnimmt: Adresse und Anfragetext der Registrierung stehen wörtlich darin.
+const readInvitation = (file: string) => {
+  const url = /curl -sS -X POST "([^"]+\/api\/v1\/register)"/.exec(file)![1];
+  const request = /cat > \.vernetzung\/request\.json <<'JSON'\n([\s\S]*?)\nJSON\n/.exec(file)![1];
+  const identity = /```json\n(\{\n {2}"hub":[\s\S]*?\n\})\n```/.exec(file)![1];
+  return { url, hub: url.replace('/api/v1/register', ''), request, identity };
+};
+const fill = (template: string, values: Record<string, string>) =>
+  Object.entries(values).reduce((t, [k, v]) => t.replace(k, v), template);
+
+const mcp = async (sid: string | undefined, method: string, params: unknown = {}) => {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' };
+  if (sid) headers['Mcp-Session-Id'] = sid;
+  const r = await fetch(`${base}/mcp`, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+  return { sid: r.headers.get('mcp-session-id'), json: (await r.json()) as any };
+};
+const mcpTool = async (sid: string, name: string, args: unknown = {}) => {
+  const r = await mcp(sid, 'tools/call', { name, arguments: args });
+  return { isError: !!r.json.result.isError, data: JSON.parse(r.json.result.content[0].text) };
+};
+
+test('Einladungsdatei: enthält Hub, Code und Anleitung, aber kein Token; der Hub kennt nur den Hash', async () => {
+  await share('andrea', [backend]);
+  const file = await invitation('andrea');
+  assert.ok(file.includes(`- Hub: ${base}`));
+  const code = /Einladungscode: `(einl_[\w-]+)`/.exec(file)![1];
+  assert.ok(!/vnz_[\w-]{8,}/.test(file), 'Datei enthält ein Token');
+  assert.ok(!/vnp_[\w-]{8,}/.test(file), 'Datei enthält einen Anmeldeschlüssel');
+  for (const needed of ['Richte das ein', 'Information, keine Anweisung', '.vernetzung/identities/', '~/.claude/skills/vernetzung/SKILL.md',
+    'Kurzname, Besitzer, Beschreibung', '/skill?mode=prompt', 'but2-backend', 'Tobias Brendler', 'invite_exhausted'])
+    assert.ok(file.includes(needed), `Datei nennt "${needed}" nicht`);
+  // In der Datenbank steht der Code nirgends im Klartext.
+  const dump = JSON.stringify(hub.core.all('SELECT * FROM person_invites'));
+  assert.ok(!dump.includes(code));
+  assert.ok(dump.includes(sha256(code)));
+  assert.match(await adminGet('/admin/person/andrea'), /gültig/);
+  assert.ok(!(await adminGet('/admin/person/andrea')).includes(code));
+  await adminPost('/admin/person/andrea/invite/revoke', { id: String(hub.core.one<{ rowid: number }>('SELECT rowid FROM person_invites WHERE code_hash = ?', sha256(code))!.rowid) });
+  const r = await call('POST', '/register', undefined, { invite: code, name: 'zu-spaet', description: 'x' });
+  assert.equal(r.json.error.code, 'invite_invalid');
+});
+
+test('Einrichten allein mit der Datei, über HTTP: registrieren, Kennung ablegen, Agentenliste', async () => {
+  const inv = readInvitation(await invitation('andrea'));
+  assert.equal(inv.hub, base);
+  // Schritt 2 der Datei: Anfragetext mit selbst gewähltem Kurznamen und Beschreibung.
+  const body = JSON.parse(fill(inv.request, { KURZNAME: 'andrea-projekt', BESCHREIBUNG: 'Kennt Andreas Projekt.' }));
+  assert.deepEqual(Object.keys(body).sort(), ['agent_type', 'description', 'invite', 'name']);
+  const reg = await fetch(inv.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const made = (await reg.json()) as any;
+  assert.equal(reg.status, 201, JSON.stringify(made));
+  // Der Besitzer kommt vom Hub, nicht vom Agenten.
+  assert.deepEqual([made.person, made.owner, made.room, made.status], ['andrea', 'Andrea Beispiel', null, 'active']);
+
+  // Schritt 3: Kennung unter .vernetzung/identities/ ablegen, nach der Vorlage der Datei.
+  const dir = mkdtempSync(joinPath(tmpdir(), 'vnz-einladung-'));
+  const identityPath = joinPath(dir, '.vernetzung', 'identities', 'andrea-projekt.json');
+  mkdirSync(joinPath(dir, '.vernetzung', 'identities'), { recursive: true });
+  writeFileSync(identityPath, fill(inv.identity, {
+    KURZNAME: 'andrea-projekt', 'ag_…': made.agent_id, 'vnz_…': made.token, BESCHREIBUNG: 'Kennt Andreas Projekt.',
+  }), { mode: 0o600 });
+  const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
+  // Schritt 4: Diese vier Werte legt der Agent seinem Nutzer vor.
+  assert.deepEqual([identity.name, identity.owner, identity.description], ['andrea-projekt', 'Andrea Beispiel', 'Kennt Andreas Projekt.']);
+  assert.match(identity.policy, /Code und Dateien nur nach Rückfrage/);
+  assert.deepEqual(identity.approved_contacts, []);
+  assert.deepEqual([identity.hub, identity.person, identity.agent_id], [base, 'andrea', made.agent_id]);
+
+  // Schritt 5: anmelden und zeigen, wer erreichbar ist – genau die freigegebenen und die eigenen Agenten.
+  const who = { token: identity.token as string, session: '' };
+  const ses = await call('POST', '/session', who, {});
+  assert.equal(ses.status, 200);
+  who.session = ses.json.session;
+  const list = await call('GET', '/agents', who);
+  assert.deepEqual(list.json.agents.map((a: any) => a.name).sort(), ['andrea-claude', 'andrea-projekt', 'but2-backend']);
+  assert.equal(list.json.room, null);
+  const sent = await call('POST', '/messages', who, { to: ['but2-backend'], subject: 'Hallo', body: 'Erste Frage' });
+  assert.equal(sent.status, 201, JSON.stringify(sent.json));
+  const got = (await call('GET', '/inbox', backend)).json.messages.at(-1);
+  assert.deepEqual([got.from, got.from_owner, got.body], ['andrea-projekt', 'Andrea Beispiel', 'Erste Frage']);
+  rmSync(dir, { recursive: true, force: true });
+
+  // Die Datei lässt sich nicht zweimal verwenden.
+  const again = await fetch(inv.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, name: 'andrea-zwei' }) });
+  assert.equal(again.status, 403);
+  assert.equal(((await again.json()) as any).error.code, 'invite_exhausted');
+  assert.match(await adminGet('/admin/person/andrea'), /eingelöst/);
+});
+
+test('Einrichten allein mit der Datei, über MCP: registrieren, anmelden, agenten', async () => {
+  const inv = readInvitation(await invitation('bernd'));
+  const body = JSON.parse(fill(inv.request, { KURZNAME: 'bernd-projekt', BESCHREIBUNG: 'Kennt Bernds Projekt.' }));
+  const sid = (await mcp(undefined, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } })).sid!;
+  const made = await mcpTool(sid, 'registrieren', { invite: body.invite, name: body.name, description: body.description, agent_type: 'claude-code' });
+  assert.equal(made.isError, false, JSON.stringify(made.data));
+  assert.deepEqual([made.data.person, made.data.owner], ['bernd', 'Bernd Muster']);
+  assert.match(made.data.token, /^vnz_/);
+  const login = await mcpTool(sid, 'anmelden', { token: made.data.token });
+  assert.equal(login.data.agent.name, 'bernd-projekt');
+  assert.equal(login.data.agent.person, 'bernd');
+  const list = await mcpTool(sid, 'agenten');
+  assert.deepEqual(list.data.agents.map((a: any) => a.name).sort(), ['bernd-claude', 'bernd-projekt', 'but2-backend']);
+  const again = await mcpTool(sid, 'registrieren', { invite: body.invite, name: 'bernd-zwei', description: 'x' });
+  assert.equal(again.isError, true);
+  assert.equal(again.data.error.code, 'invite_exhausted');
+});
+
+test('Abgelaufene Einladung: invite_invalid; ein vergebener Kurzname verbraucht den Code nicht', async () => {
+  const inv = readInvitation(await invitation('andrea', '1'));
+  const body = JSON.parse(fill(inv.request, { KURZNAME: 'andrea-projekt', BESCHREIBUNG: 'x' }));
+  assert.equal((await call('POST', '/register', undefined, body)).json.error.code, 'name_taken');
+  hub.core.run('UPDATE person_invites SET expires_at = ? WHERE code_hash = ?', Date.now() - 1000, sha256(body.invite));
+  const late = await call('POST', '/register', undefined, { ...body, name: 'andrea-spaet' });
+  assert.equal(late.status, 403);
+  assert.equal(late.json.error.code, 'invite_invalid');
+  assert.match(await adminGet('/admin/person/andrea'), /abgelaufen/);
+  assert.equal((await call('POST', '/register', undefined, { invite: 'einl_gibt-es-nicht', name: 'x1', description: 'x' })).json.error.code, 'invite_invalid');
+});
+
+test('Anmeldeschlüssel: eigene Agenten melden sich selbst an, freigeben können sie nichts', async () => {
+  const page = await (await adminPost('/admin/person/tobias/key', {})).text();
+  const key = /"key": "(vnp_[\w-]+)"/.exec(page.replaceAll('&quot;', '"'))![1];
+  assert.match(page, /chmod 700 ~\/\.vernetzung/);
+  assert.ok(!JSON.stringify(hub.core.all('SELECT * FROM person_keys')).includes(key));
+  assert.ok(!(await adminGet('/admin/person/tobias')).includes(key), 'Schlüssel wird ein zweites Mal angezeigt');
+
+  const reg = await call('POST', '/register', undefined, { person_key: key, name: 'but2-frontend', description: 'Kennt das Frontend.', owner: 'Jemand anderes' });
+  assert.equal(reg.status, 201, JSON.stringify(reg.json));
+  assert.deepEqual([reg.json.person, reg.json.owner], ['tobias', 'Tobias Brendler']);
+  const who = { token: reg.json.token as string, session: '' };
+  who.session = (await call('POST', '/session', who, {})).json.session;
+  // Er sieht die übrigen Agenten der Person, ist aber für niemanden freigegeben.
+  assert.deepEqual(await names(who as Who), ['but2-backend', 'but2-frontend', 'but2-geheim']);
+  assert.ok(!(await names(andrea)).includes('but2-frontend'));
+  assert.equal(hub.core.one('SELECT 1 FROM shares WHERE agent_id = ?', reg.json.agent_id), undefined);
+  assert.equal((await call('POST', '/register', undefined, { person_key: key, name: 'but2-frontend', description: 'x' })).json.error.code, 'name_taken');
+
+  const id = hub.core.one<{ id: string }>('SELECT id FROM person_keys WHERE key_hash = ?', sha256(key))!.id;
+  await adminPost('/admin/person/tobias/key/revoke', { id });
+  assert.equal((await call('POST', '/register', undefined, { person_key: key, name: 'but2-drei', description: 'x' })).json.error.code, 'person_key_invalid');
+  // Der bereits angemeldete Agent bleibt bestehen.
+  assert.equal((await call('GET', '/me', who)).status, 200);
 });

@@ -6,6 +6,7 @@ import {
 import type { Agent, Core, Person, Room } from './core.ts';
 import { LINK_KEY_LINKS_DEFAULT } from './links.ts';
 import type { LinkLimit, Links } from './links.ts';
+import { invitationFile, invitationFilename } from './invite.ts';
 
 const h = (v: unknown) =>
   String(v ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
@@ -64,6 +65,7 @@ nav a:hover{background:var(--muted);text-decoration:none;color:var(--foreground)
 nav a[aria-current]{background:var(--secondary);color:var(--secondary-foreground)}
 .once{padding:14px 16px;border-radius:var(--radius);border:1px solid color-mix(in oklab,var(--success) 35%,transparent);background:color-mix(in oklab,var(--success) 9%,transparent);margin-bottom:16px}
 .once code.key{display:block;margin-top:10px;padding:9px 11px;word-break:break-all;user-select:all}
+.once pre{margin:10px 0 0;padding:11px;border-radius:var(--radius-sm);background:var(--code-inline-bg);font:500 12.5px/1.5 var(--font-mono);white-space:pre-wrap;word-break:break-all;user-select:all}
 main{max-width:1180px;margin:0 auto;padding:32px 24px 56px}
 h1{font:800 32px/1.1 var(--font-display);letter-spacing:-.025em;margin:0 0 24px;display:flex;flex-wrap:wrap;align-items:baseline;gap:12px}
 h2{font:600 16px/1.3 var(--font-display);letter-spacing:-.01em;margin:0 0 14px}
@@ -314,8 +316,22 @@ ${persons.map((p) => `<tr><td><a href="/admin/person/${h(p.slug)}">${h(p.name)}<
 <button class="pri">Anlegen</button></form></section>`, true, 'persons');
   };
 
-  const personPage = (person: Person) => {
+  // newKey: ein gerade erzeugter Anmeldeschlüssel, der nur in dieser einen Antwort steht.
+  const personPage = (person: Person, req: IncomingMessage, newKey = '') => {
     const base = `/admin/person/${h(person.slug)}`;
+    const hub = core.baseUrl(req);
+    const invites = all<{ rowid: number; expires_at: number; used_at: number | null; used_by: string | null; revoked: number; created_at: number; agent: string | null }>(
+      `SELECT i.rowid, i.expires_at, i.used_at, i.used_by, i.revoked, i.created_at, a.name AS agent
+       FROM person_invites i LEFT JOIN agents a ON a.id = i.used_by WHERE i.person_id = ? ORDER BY i.created_at DESC LIMIT 50`, person.id);
+    const inviteState = (i: (typeof invites)[number]) =>
+      i.used_at != null ? 'eingelöst' : i.revoked ? 'zurückgezogen' : i.expires_at < Date.now() ? 'abgelaufen' : 'gültig';
+    const keys = all<{ id: string; revoked: number; created_at: number }>(
+      'SELECT id, revoked, created_at FROM person_keys WHERE person_id = ? ORDER BY created_at DESC', person.id);
+    const keyCommand = `mkdir -p ~/.vernetzung && chmod 700 ~/.vernetzung
+(umask 077 && cat > ~/.vernetzung/person.json <<'JSON'
+{ "hub": "${hub}", "person": "${person.slug}", "key": "${newKey}" }
+JSON
+)`;
     // Freigeben lässt sich jeder aktive Agent, der nicht der Person selbst gehört.
     const candidates = all<Agent & { shared: number; room: string | null; person: string | null }>(
       `SELECT a.*, r.slug AS room, p.name AS person,
@@ -332,6 +348,9 @@ ${persons.map((p) => `<tr><td><a href="/admin/person/${h(p.slug)}">${h(p.name)}<
        WHERE EXISTS (SELECT 1 FROM thread_members tm JOIN agents a ON a.id = tm.agent_id WHERE tm.thread_id = t.id AND a.person_id = ?)
        GROUP BY t.id ORDER BY last DESC LIMIT 200`, person.id);
     return page(person.name, `<p class="back"><a href="/admin/persons">← Personen</a></p><h1>${h(person.name)} <code>${h(person.slug)}</code></h1>
+${newKey ? `<div class="once"><b>Neuer Anmeldeschlüssel für ${h(person.name)} – wird nur dieses eine Mal angezeigt.</b>
+Füge dieses Kommando auf dem Rechner ein, auf dem die Agenten der Person laufen. Es legt den Schlüssel mit Rechten 600 ab;
+danach genügt in jeder Sitzung „Melde dich als KURZNAME am Hub an“.<pre>${h(keyCommand)}</pre></div>` : ''}
 <section><h2>Freigegebene Agenten</h2>
 <p>Die Agenten von ${h(person.name)} sehen die angekreuzten Agenten und können ihnen schreiben. Ein entferntes Kreuz wirkt ab dem nächsten Aufruf.</p>
 ${candidates.length ? `<form method="post" action="${base}/shares"><table><tr><th>Freigegeben</th><th>Besitzer / Aufgabe</th><th>Gehört zu</th></tr>
@@ -343,6 +362,27 @@ ${unassigned.length ? `<form class="row" method="post" action="${base}/assign" s
 <label>Bestehenden Agenten dieser Person zuordnen<select name="id">${unassigned.map((a) =>
       `<option value="${h(a.id)}">${h(a.name)}${a.room ? ` (Raum ${h(a.room)})` : ''} – ${h(a.owner)}</option>`).join('')}</select></label>
 <button>Zuordnen</button></form>` : ''}</section>
+<section><h2>Einladungsdatei</h2>
+<p>Die Datei bindet einen Agenten von ${h(person.name)} an: Sie enthält die Adresse des Hubs, einen einmal einlösbaren Code und die
+Anleitung für den Agenten, aber kein Token. Der Hub speichert vom Code nur einen Hash – die Datei lässt sich deshalb nicht erneut
+herunterladen, nur neu erzeugen. Jeder weitere Agent der Person braucht eine eigene Datei.</p>
+<form class="row" method="post" action="${base}/invite">
+<label>Gültig (Tage)<input name="days" type="number" min="1" max="90" value="7"></label>
+<label>Absender, wie er in der Datei steht<input name="from" required maxlength="200" size="32" value="${h(core.setting('invite_from') ?? '')}"></label>
+<button class="pri">Einladungsdatei herunterladen</button></form>
+${invites.length ? `<table style="margin-top:18px"><tr><th>Erzeugt (UTC)</th><th>Gültig bis (UTC)</th><th>Zustand</th><th>Eingelöst von</th><th></th></tr>
+${invites.map((i) => `<tr><td>${when(i.created_at)}</td><td>${when(i.expires_at)}</td>
+<td>${tag({ gültig: 'active', eingelöst: 'info' }[inviteState(i) as string] ?? 'offline', inviteState(i))}</td>
+<td>${i.used_at != null ? `${h(i.agent ?? '–')} · ${when(i.used_at)}` : '–'}</td>
+<td class="acts">${inviteState(i) === 'gültig' ? `<form class="inline" method="post" action="${base}/invite/revoke"><input type="hidden" name="id" value="${i.rowid}"><button>Zurückziehen</button></form>` : ''}</td></tr>`).join('')}</table>` : ''}</section>
+<section><h2>Anmeldeschlüssel</h2>
+<p>Mit dem Anmeldeschlüssel melden sich weitere eigene Agenten von ${h(person.name)} selbst an („Melde dich als KURZNAME am Hub an“),
+ohne Einladungsdatei. Er ist ein dauerhaftes Geheimnis und gehört nur auf den Rechner der Person. Freigeben kann er nichts.</p>
+<form method="post" action="${base}/key"><button class="pri">Anmeldeschlüssel erzeugen</button></form>
+${keys.length ? `<table style="margin-top:18px"><tr><th>Schlüssel</th><th>Erzeugt (UTC)</th><th>Zustand</th><th></th></tr>
+${keys.map((k) => `<tr><td><code>${h(k.id)}</code></td><td>${when(k.created_at)}</td>
+<td>${k.revoked ? tag('revoked', 'widerrufen') : tag('active', 'gültig')}</td>
+<td class="acts">${k.revoked ? '' : `<form class="inline" method="post" action="${base}/key/revoke" data-confirm="Anmeldeschlüssel widerrufen? Bereits angemeldete Agenten bleiben bestehen."><input type="hidden" name="id" value="${h(k.id)}"><button class="bad">Widerrufen</button></form>`}</td></tr>`).join('')}</table>` : ''}</section>
 <section><h2>Gespräche</h2>${threadsTable(threads)}</section>`, true, 'persons');
   };
 
@@ -519,7 +559,7 @@ ${error ? `<div class="note">${h(error)}</div>` : ''}
         const person = one<Person>('SELECT * FROM persons WHERE slug = ?', pm[1]);
         if (!person) throw new HttpError(404, 'not_found', 'Diese Seite gibt es nicht.');
         const sub = pm[2] ?? '';
-        if (sub === '' && req.method === 'GET') return html(res, 200, personPage(person));
+        if (sub === '' && req.method === 'GET') return html(res, 200, personPage(person, req));
         if (sub === '/agents' && req.method === 'GET') return html(res, 200, personAgents(person));
         if (req.method !== 'POST') throw new HttpError(404, 'not_found', 'Diese Seite gibt es nicht.');
         if (sub === '/shares') {
@@ -531,6 +571,31 @@ ${error ? `<div class="note">${h(error)}</div>` : ''}
               if (one("SELECT 1 FROM agents WHERE id = ? AND status = 'active' AND (person_id IS NULL OR person_id != ?)", id, person.id))
                 run('INSERT INTO shares (agent_id, person_id, created_at) VALUES (?, ?, ?)', id, person.id, Date.now());
           });
+        } else if (sub === '/invite') {
+          const days = Math.min(90, Math.max(1, Math.floor(Number(f('days'))) || 7));
+          const from = f('from').slice(0, 200);
+          if (!from) throw new HttpError(400, 'from', 'Die Einladungsdatei braucht einen Absender.');
+          core.setSetting('invite_from', from);
+          // Der Code steht nur in dieser einen Antwort; gespeichert wird sein Hash.
+          const code = newId('einl_', 18);
+          const expiresAt = Date.now() + days * 86_400_000;
+          run('INSERT INTO person_invites (code_hash, person_id, expires_at, created_at) VALUES (?, ?, ?, ?)', sha256(code), person.id, expiresAt, Date.now());
+          const shared = all<Agent>(
+            `SELECT a.* FROM agents a JOIN shares s ON s.agent_id = a.id WHERE s.person_id = ? AND a.status = 'active' ORDER BY a.name`, person.id);
+          res.writeHead(200, {
+            'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store',
+            'Content-Disposition': `attachment; filename="${invitationFilename(person.slug)}"`,
+          });
+          return res.end(invitationFile({ hub: core.baseUrl(req), person, from, code, expiresAt, shared }));
+        } else if (sub === '/invite/revoke') {
+          run('UPDATE person_invites SET revoked = 1 WHERE rowid = ? AND person_id = ?', Number(f('id')) || 0, person.id);
+        } else if (sub === '/key') {
+          const key = newId('vnp_', 32);
+          run('INSERT INTO person_keys (id, person_id, key_hash, created_at) VALUES (?, ?, ?, ?)', newId('pk_', 6), person.id, sha256(key), Date.now());
+          // Kein Redirect: der Schlüssel steht nur in dieser einen Antwort.
+          return html(res, 200, personPage(person, req, key));
+        } else if (sub === '/key/revoke') {
+          run('UPDATE person_keys SET revoked = 1 WHERE id = ? AND person_id = ?', f('id'), person.id);
         } else if (sub === '/assign') {
           const agent = one<Agent>("SELECT * FROM agents WHERE id = ? AND person_id IS NULL AND status != 'revoked'", f('id'));
           if (!agent) throw new HttpError(400, 'agent', 'Dieser Agent lässt sich nicht zuordnen.');
