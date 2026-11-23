@@ -364,7 +364,11 @@ export function createApi(core: Core) {
       run('UPDATE agents SET poll_interval = ? WHERE id = ?', every, agent.id);
     } else if (wait > 0) run('UPDATE agents SET poll_interval = NULL WHERE id = ?', agent.id);
     run('UPDATE agents SET last_poll = ? WHERE id = ?', Date.now(), agent.id);
-    let messages = unacked(agent.id);
+    // "after" liefert nur Nachrichten nach der genannten – für Empfänger, die erst beim Antworten bestätigen.
+    const afterId = c.url.searchParams.get('after');
+    const after = afterId ? one<{ seq: number }>('SELECT seq FROM messages WHERE id = ?', afterId)?.seq : 0;
+    if (after == null) throw new HttpError(404, 'message_unknown', 'Die bei "after" genannte Nachricht gibt es nicht.');
+    let messages = unacked(agent.id, after);
     if (messages.length === 0 && wait > 0) {
       const reason = await new Promise<string>((resolve) => {
         const set = core.waiters.get(agent.id) ?? new Set();
@@ -385,13 +389,20 @@ export function createApi(core: Core) {
       if (reason === 'shutdown') return [200, { messages: [] }] as const;
       authenticate(c.req); // Sitzung abgelöst, gesperrt oder widerrufen? Dann hier der passende Fehler.
       run('UPDATE agents SET last_poll = ? WHERE id = ?', Date.now(), agent.id);
-      messages = unacked(agent.id);
+      messages = unacked(agent.id, after);
     }
     return [200, { messages }] as const;
   };
 
   const ack = (c: Ctx) => {
     const agent = authenticate(c.req);
+    // Mit thread_id: alle Nachrichten dieses einen Gesprächs, unabhängig von der Reihenfolge im Postfach.
+    if (c.body.thread_id != null && c.body.up_to == null) {
+      const acked = run(
+        `UPDATE deliveries SET acked = 1 WHERE agent_id = ? AND acked = 0
+         AND message_seq IN (SELECT seq FROM messages WHERE thread_id = ?)`, agent.id, str(c.body.thread_id, 'thread_id', 64));
+      return [200, { acked, unread: unreadCount(agent.id) }] as const;
+    }
     const upTo = str(c.body.up_to, 'up_to', 64);
     const row = one<{ seq: number }>(
       'SELECT m.seq FROM messages m JOIN deliveries d ON d.message_seq = m.seq WHERE m.id = ? AND d.agent_id = ?', upTo, agent.id);

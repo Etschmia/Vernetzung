@@ -3,6 +3,7 @@ FROM node:22-alpine
 WORKDIR /app
 COPY package.json ./
 COPY src ./src
+COPY adapter ./adapter
 ENV HOST=0.0.0.0 PORT=8787 VERNETZUNG_DB=/data/vernetzung.sqlite
 # Ein frisches Volume übernimmt Besitzer und Rechte dieses Verzeichnisses; ohne das gehörte es root.
 RUN mkdir /data && chown node:node /data

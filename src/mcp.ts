@@ -65,9 +65,13 @@ const TOOLS = [
     {
       wait: { type: 'integer', minimum: 0, maximum: 60, description: 'Sekunden, die auf Post gewartet wird; Standard 0' },
       every: { type: 'integer', minimum: 30, maximum: 86400, description: 'Angemeldeter Abfrage-Rhythmus in Sekunden' },
+      after: { ...text, description: 'Nur Nachrichten nach dieser liefern (msg_…)' },
     }),
-  tool('bestaetigen', 'Bestätigt alle Nachrichten bis einschließlich der genannten; unbestätigte kommen wieder.',
-    { up_to: { ...text, description: 'id der letzten bearbeiteten Nachricht (msg_…)' } }, ['up_to']),
+  tool('bestaetigen', 'Bestätigt Nachrichten; unbestätigte kommen wieder. Entweder "up_to": alle bis einschließlich der genannten. Oder "thread_id": alle eines Gesprächs.',
+    {
+      up_to: { ...text, description: 'id der letzten bearbeiteten Nachricht (msg_…)' },
+      thread_id: { ...text, description: 'Gespräch, dessen Nachrichten bestätigt werden (th_…)' },
+    }),
   tool('gespraeche', 'Listet die Gespräche der Kennung.'),
   tool('gespraech', 'Liefert ein Gespräch vollständig.', { thread_id: { ...text, description: 'th_…' } }, ['thread_id']),
 ];
@@ -109,7 +113,7 @@ export function createMcp(core: Core, invoke: Invoke) {
       me = { headers: { 'x-vernetzung-session': bound.session_id }, agentId: bound.agent_id };
     }
     const query = new URLSearchParams();
-    for (const key of ['wait', 'every']) if (args[key] != null) query.set(key, String(args[key]));
+    for (const key of ['wait', 'every', 'after']) if (args[key] != null) query.set(key, String(args[key]));
     const route =
       name === 'abmelden' ? 'DELETE /session'
       : name === 'wer_bin_ich' ? 'GET /me'

@@ -1,5 +1,6 @@
 // Setzt API, GUI und Skill-Auslieferung zu einem HTTP-Handler zusammen.
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { createCore } from './core.ts';
 import type { Config } from './core.ts';
 import { createApi } from './api.ts';
@@ -7,6 +8,9 @@ import { createAdmin } from './admin.ts';
 import { createMcp } from './mcp.ts';
 import { createLinks, invitePage } from './links.ts';
 import { landing, skillMarkdown, skillPrompt } from './skill.ts';
+
+// Der Channel-Adapter für Claude Code: eine einzelne Datei ohne Abhängigkeiten, die der Hub ausliefert.
+const ADAPTER = readFileSync(new URL('../adapter/vernetzung-kanal.mjs', import.meta.url), 'utf8');
 
 export function createHub(cfg: Config) {
   const core = createCore(cfg);
@@ -44,6 +48,7 @@ export function createHub(cfg: Config) {
     const hub = core.baseUrl(req);
     if (path === '/skill')
       return text(res, 200, 'text/markdown', url.searchParams.get('mode') === 'prompt' ? skillPrompt(hub) : skillMarkdown(hub));
+    if (path === '/adapter') return text(res, 200, 'text/javascript', ADAPTER);
     if (path === '/') return text(res, 200, 'text/markdown', landing(hub));
     if (path === '/healthz') return text(res, 200, 'text/plain', 'ok\n');
     // Landeseite einer Einladung: für jede Kennung dieselbe Seite, ohne Skript und ohne Nachschlagen.
