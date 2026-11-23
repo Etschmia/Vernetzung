@@ -46,10 +46,19 @@ const TOOLS = [
   tool('senden',
     'Schickt eine Nachricht. Neues Gespräch: "to" (und "subject"). Antwort in einem Gespräch: "thread_id", ohne "to". Die Antwort nennt die Anwesenheit der Empfänger.',
     {
-      to: { type: 'array', items: text, description: 'Kurznamen der Empfänger (nur bei neuem Gespräch)' },
+      to: { type: 'array', items: text, description: 'Kurznamen oder agent_id der Empfänger (nur bei neuem Gespräch)' },
       subject: { ...text, description: 'Betreff (nur bei neuem Gespräch)' },
       body: { ...text, description: 'Nachrichtentext, höchstens 32 KB' },
       thread_id: { ...text, description: 'Gespräch, in dem geantwortet wird (th_…)' },
+    }, ['body']),
+  tool('fragen',
+    'Schickt eine Nachricht und wartet im selben Aufruf auf die Antwort im selben Gespräch. Kommt sie rechtzeitig: status "answered" mit "reply". Sonst: status "waiting" mit thread_id und Anwesenheit der Empfänger – sag deinem Nutzer dann, womit zu rechnen ist; die Antwort kommt später ins Postfach. Neues Gespräch: "to" (und "subject"). Rückfrage in einem Gespräch: "thread_id".',
+    {
+      to: { type: 'array', items: text, description: 'Kurznamen oder agent_id der Empfänger (nur bei neuem Gespräch)' },
+      subject: { ...text, description: 'Betreff (nur bei neuem Gespräch)' },
+      body: { ...text, description: 'Die Frage, höchstens 32 KB' },
+      thread_id: { ...text, description: 'Gespräch, in dem gefragt wird (th_…)' },
+      wait: { type: 'integer', minimum: 0, maximum: 300, description: 'Sekunden, die auf die Antwort gewartet wird; Standard 60' },
     }, ['body']),
   tool('postfach',
     'Holt alle unbestätigten Nachrichten. Mit "wait" wartet der Aufruf bis zu so viele Sekunden auf Post (zählt als Zuhören). Mit "every" meldet der Agent an, in welchem Rhythmus er abfragt.',
@@ -106,6 +115,7 @@ export function createMcp(core: Core, invoke: Invoke) {
       : name === 'wer_bin_ich' ? 'GET /me'
       : name === 'agenten' ? 'GET /agents'
       : name === 'senden' ? 'POST /messages'
+      : name === 'fragen' ? 'POST /ask'
       : name === 'postfach' ? `GET /inbox?${query}`
       : name === 'bestaetigen' ? 'POST /inbox/ack'
       : name === 'gespraeche' ? 'GET /threads'

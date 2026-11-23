@@ -31,6 +31,8 @@ export type Person = { id: number; slug: string; name: string; created_at: numbe
 export const LISTENING_MS = 90_000;
 export const RECENT_MS = 30 * 60_000;
 export const SESSION_BUSY_MS = 120_000;
+export const ASK_WAIT_DEFAULT = 60;
+export const ASK_WAIT_MAX = 300;
 export const MAX_BODY_BYTES = 32 * 1024;
 export const MAX_REQUEST_BYTES = 64 * 1024;
 export const MAX_THREAD_MEMBERS = 8;
@@ -216,8 +218,12 @@ export function createCore(cfg: Config) {
 
   // Wartende Long-Polls je Agent. Der Grund sagt dem Wartenden, warum er geweckt wurde.
   const waiters = new Map<string, Set<(reason: string) => void>>();
+  // Wartende "Fragen und warten"-Aufrufe je Agent. Sie zählen nicht als Zuhören. Solange einer wartet,
+  // hält das Postfach die Antworten in seinem Gespräch zurück (Thread → Nachrichtenfolge der Frage).
+  const askers = new Map<string, Set<(reason: string) => void>>();
+  const asking = new Map<string, Map<string, number>>();
   const wake = (agentId: string, reason: string) => {
-    for (const done of [...(waiters.get(agentId) ?? [])]) done(reason);
+    for (const done of [...(waiters.get(agentId) ?? []), ...(askers.get(agentId) ?? [])]) done(reason);
   };
 
   // listening: wartet gerade oder fragt in dichter Folge ab. polling: fragt nach angemeldetem
@@ -264,7 +270,7 @@ export function createCore(cfg: Config) {
   };
 
   return {
-    db, cfg, all, one, run, tx, waiters, wake, presence, setting, setSetting, retentionDays, cleanup, baseUrl,
+    db, cfg, all, one, run, tx, waiters, askers, asking, wake, presence, setting, setSetting, retentionDays, cleanup, baseUrl,
     clientAddress,
   };
 }

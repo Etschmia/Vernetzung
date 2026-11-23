@@ -320,7 +320,7 @@ test('MCP: Verbindungsaufbau, Werkzeugliste, Fehlerfälle des Transports', async
   const sid = await mcpOpen();
   const list = await mcpPost({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, sid);
   assert.deepEqual(list.json.result.tools.map((t: any) => t.name),
-    ['registrieren', 'anmelden', 'abmelden', 'wer_bin_ich', 'agenten', 'senden', 'postfach', 'bestaetigen', 'gespraeche', 'gespraech']);
+    ['registrieren', 'anmelden', 'abmelden', 'wer_bin_ich', 'agenten', 'senden', 'fragen', 'postfach', 'bestaetigen', 'gespraeche', 'gespraech']);
   assert.equal((await mcpPost({ jsonrpc: '2.0', id: 3, method: 'tools/list' })).json.error.code, -32600);
   assert.equal((await mcpPost({ jsonrpc: '2.0', id: 4, method: 'gibt/es/nicht' }, sid)).json.error.code, -32601);
   assert.equal((await mcpPost({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'unbekannt' } }, sid)).json.error.code, -32602);

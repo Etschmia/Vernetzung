@@ -426,3 +426,91 @@ test('Anmeldeschlüssel: eigene Agenten melden sich selbst an, freigeben können
   // Der bereits angemeldete Agent bleibt bestehen.
   assert.equal((await call('GET', '/me', who)).status, 200);
 });
+
+// ---- Fragen und warten ----
+
+const drain = async (who: Who) => {
+  const messages = (await call('GET', '/inbox', who)).json.messages;
+  if (messages.length) await call('POST', '/inbox/ack', who, { up_to: messages.at(-1).id });
+};
+
+test('Fragen und warten: die Antwort kommt im selben Aufruf und nicht noch einmal ins Postfach', async () => {
+  await drain(backend);
+  await drain(andrea);
+  const started = Date.now();
+  const asked = call('POST', '/ask', andrea, { to: ['but2-backend'], subject: 'Schnittstelle X', body: 'Wie ist X gedacht?', wait: 20 });
+  // Ein gleichzeitiger Long-Poll derselben Kennung (etwa der Channel-Adapter) darf die Antwort nicht abfangen.
+  const parallel = call('GET', '/inbox?wait=3', andrea);
+  const question = (await call('GET', '/inbox?wait=5', backend)).json.messages[0];
+  assert.deepEqual([question.from, question.subject, question.body], ['andrea-claude', 'Schnittstelle X', 'Wie ist X gedacht?']);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal((await call('POST', '/messages', backend, { thread_id: question.thread_id, body: 'X liefert JSON.' })).status, 201);
+
+  const answer = await asked;
+  assert.equal(answer.status, 200, JSON.stringify(answer.json));
+  assert.equal(answer.json.status, 'answered');
+  assert.equal(answer.json.thread_id, question.thread_id);
+  assert.deepEqual([answer.json.reply.from, answer.json.reply.from_id, answer.json.reply.body, answer.json.reply.thread_id],
+    ['but2-backend', backend.id, 'X liefert JSON.', question.thread_id]);
+  assert.ok(Date.now() - started < 5000, 'Antwort kam nicht sofort');
+  assert.deepEqual((await parallel).json.messages, []);
+  assert.deepEqual((await call('GET', '/inbox', andrea)).json.messages, []);
+  assert.equal((await call('GET', `/threads/${question.thread_id}`, andrea)).json.messages.length, 2);
+
+  // Rückfrage im selben Gespräch.
+  await call('POST', '/inbox/ack', backend, { up_to: question.id });
+  const followUp = call('POST', '/ask', andrea, { thread_id: question.thread_id, body: 'Und die Fehler?', wait: 20 });
+  const second = (await call('GET', '/inbox?wait=5', backend)).json.messages[0];
+  assert.equal(second.body, 'Und die Fehler?');
+  await call('POST', '/messages', backend, { thread_id: second.thread_id, body: 'Als error-Objekt.' });
+  assert.equal((await followUp).json.reply.body, 'Als error-Objekt.');
+  await call('POST', '/inbox/ack', backend, { up_to: second.id });
+});
+
+test('Fragen und warten: läuft die Zeit ab, kommen thread_id und Anwesenheit; die Antwort liegt später im Postfach', async () => {
+  const started = Date.now();
+  const asked = await call('POST', '/ask', andrea, { to: ['but2-backend'], subject: 'Später', body: 'Hast du Zeit?', wait: 1 });
+  assert.equal(asked.status, 200, JSON.stringify(asked.json));
+  assert.ok(Date.now() - started >= 900);
+  assert.equal(asked.json.status, 'waiting');
+  assert.match(asked.json.thread_id, /^th_/);
+  assert.equal(asked.json.reply, undefined);
+  assert.deepEqual(asked.json.recipients.map((r: any) => [r.agent_id, r.name]), [[backend.id, 'but2-backend']]);
+  assert.ok(['listening', 'polling', 'recent', 'offline'].includes(asked.json.recipients[0].presence));
+
+  // Später nachsehen: Die Antwort kommt ins Postfach und steht im Gespräch.
+  await call('POST', '/messages', backend, { thread_id: asked.json.thread_id, body: 'Jetzt ja.' });
+  const inbox = (await call('GET', '/inbox', andrea)).json.messages;
+  assert.deepEqual(inbox.map((m: any) => [m.thread_id, m.body]), [[asked.json.thread_id, 'Jetzt ja.']]);
+  await drain(andrea);
+  await drain(backend);
+
+  // wait: 0 wartet gar nicht; nicht freigegebene Empfänger scheitern wie beim Senden.
+  assert.equal((await call('POST', '/ask', andrea, { to: ['but2-backend'], body: 'x', wait: 0 })).json.status, 'waiting');
+  assert.equal((await call('POST', '/ask', andrea, { to: ['but2-geheim'], body: 'x' })).json.error.code, 'recipient_unknown');
+  assert.equal((await call('POST', '/ask', andrea, { to: ['but2-backend'], body: 'x', wait: 'lange' })).json.error.code, 'field_invalid');
+  await drain(backend);
+});
+
+test('Fragen und warten über MCP: Werkzeug "fragen" liefert Antwort oder Wartestand', async () => {
+  const sid = (await mcp(undefined, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } })).sid!;
+  const tools = (await mcp(sid, 'tools/list')).json.result.tools.map((t: any) => t.name);
+  assert.ok(tools.includes('fragen'));
+  const login = await mcpTool(sid, 'anmelden', { token: andrea.token, takeover: true });
+  assert.equal(login.isError, false, JSON.stringify(login.data));
+
+  const asked = mcpTool(sid, 'fragen', { to: ['but2-backend'], subject: 'Per MCP', body: 'Hörst du mich?', wait: 20 });
+  const question = (await call('GET', '/inbox?wait=5', backend)).json.messages[0];
+  assert.equal(question.body, 'Hörst du mich?');
+  await call('POST', '/messages', backend, { thread_id: question.thread_id, body: 'Ja.' });
+  const answer = await asked;
+  assert.equal(answer.isError, false, JSON.stringify(answer.data));
+  assert.deepEqual([answer.data.status, answer.data.reply.body, answer.data.thread_id], ['answered', 'Ja.', question.thread_id]);
+
+  const late = await mcpTool(sid, 'fragen', { thread_id: question.thread_id, body: 'Noch da?', wait: 1 });
+  assert.deepEqual([late.data.status, late.data.thread_id], ['waiting', question.thread_id]);
+  assert.equal(late.data.recipients[0].name, 'but2-backend');
+  await drain(backend);
+  // Die MCP-Anmeldung hat Andreas Sitzung abgelöst; für die folgenden Tests wieder über HTTP anmelden.
+  andrea.session = (await call('POST', '/session', andrea, { takeover: true })).json.session;
+});

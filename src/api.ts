@@ -1,7 +1,7 @@
 // Die Agenten-API unter /api/v1 – siehe docs/PROTOKOLL.md.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
-  HttpError, MAX_BODY_BYTES, MAX_THREAD_MEMBERS, NAME_RE, SEND_LIMIT_PER_MINUTE, SESSION_BUSY_MS,
+  ASK_WAIT_DEFAULT, ASK_WAIT_MAX, HttpError, MAX_BODY_BYTES, MAX_THREAD_MEMBERS, NAME_RE, SEND_LIMIT_PER_MINUTE, SESSION_BUSY_MS,
   iso, newId, readJson, sendJson, sha256, verifyPassword,
 } from './core.ts';
 import type { Agent, Core, Person, Room } from './core.ts';
@@ -211,7 +211,12 @@ export function createApi(core: Core) {
   };
 
   const sendMessage = (c: Ctx) => {
-    const agent = authenticate(c.req);
+    const { seq: _seq, ...sent } = deliver(authenticate(c.req), c);
+    return [201, sent] as const;
+  };
+
+  // Legt die Nachricht ab und weckt die Empfänger. "seq" ist ihre Stelle in der Nachrichtenfolge.
+  const deliver = (agent: Agent, c: Ctx) => {
     const body = c.body.body;
     if (typeof body !== 'string' || !body.trim()) throw new HttpError(400, 'field_missing', 'Feld "body" fehlt.');
     if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES)
@@ -269,20 +274,83 @@ export function createApi(core: Core) {
         messageId, threadId, agent.id, body, now);
       const seq = one<{ seq: number }>('SELECT seq FROM messages WHERE id = ?', messageId)!.seq;
       for (const id of recipients) run('INSERT INTO deliveries (message_seq, agent_id) VALUES (?, ?)', seq, id);
-      return { message_id: messageId, thread_id: threadId, recipients };
+      return { message_id: messageId, thread_id: threadId, recipients, seq };
     });
     // Anwesenheit vor dem Wecken ermitteln: so erfährt der Absender, wer die Nachricht sofort sieht.
-    const recipients = result.recipients.map((id) => {
-      const r = one<Agent>('SELECT * FROM agents WHERE id = ?', id)!;
-      return { agent_id: r.id, name: r.name, ...presenceInfo(r) };
-    });
+    const recipients = recipientPresence(result.recipients);
     for (const id of result.recipients) core.wake(id, 'message');
-    return [201, { message_id: result.message_id, thread_id: result.thread_id, recipients }] as const;
+    return { message_id: result.message_id, thread_id: result.thread_id, recipients, seq: result.seq };
+  };
+  const recipientPresence = (ids: string[]) => ids.map((id) => {
+    const r = one<Agent>('SELECT * FROM agents WHERE id = ?', id)!;
+    return { agent_id: r.id, name: r.name, ...presenceInfo(r) };
+  });
+
+  // Fragen und warten: sendet wie POST /messages und wartet dann auf die erste Antwort im selben Gespräch.
+  const ask = async (c: Ctx) => {
+    const agent = authenticate(c.req);
+    const waitRaw = c.body.wait == null ? ASK_WAIT_DEFAULT : Number(c.body.wait);
+    if (!Number.isFinite(waitRaw)) throw new HttpError(400, 'field_invalid', 'Feld "wait" muss eine Zahl von Sekunden sein.');
+    const wait = Math.min(ASK_WAIT_MAX, Math.max(0, waitRaw));
+    const sent = deliver(agent, c);
+    const firstReply = () => all<MsgRow & { seq: number }>(
+      `${MSG_SELECT.replace('SELECT ', 'SELECT m.seq, ')} JOIN deliveries d ON d.message_seq = m.seq
+       WHERE d.agent_id = ? AND d.acked = 0 AND m.thread_id = ? AND m.seq > ? ORDER BY m.seq LIMIT 1`, agent.id, sent.thread_id, sent.seq)[0];
+
+    const deadline = Date.now() + wait * 1000;
+    const threads = core.asking.get(agent.id) ?? new Map<string, number>();
+    core.asking.set(agent.id, threads);
+    // Fragt dieselbe Kennung im selben Gespräch mehrfach zugleich, zählt die früheste Frage.
+    const outer = threads.get(sent.thread_id);
+    threads.set(sent.thread_id, Math.min(outer ?? sent.seq, sent.seq));
+    try {
+      for (;;) {
+        const reply = firstReply();
+        if (reply) {
+          // Die Antwort ist damit zugestellt und bestätigt; sie erscheint nicht noch einmal im Postfach.
+          run('UPDATE deliveries SET acked = 1 WHERE agent_id = ? AND message_seq = ?', agent.id, reply.seq);
+          return [200, { status: 'answered', message_id: sent.message_id, thread_id: sent.thread_id, reply: shapeMessages([reply])[0] }] as const;
+        }
+        const left = deadline - Date.now();
+        if (left <= 0) break;
+        const reason = await new Promise<string>((resolve) => {
+          const set = core.askers.get(agent.id) ?? new Set();
+          core.askers.set(agent.id, set);
+          const done = (r: string) => {
+            clearTimeout(timer);
+            set.delete(done);
+            c.res.off('close', onClose);
+            resolve(r);
+          };
+          const onClose = () => done('closed');
+          const timer = setTimeout(() => done('timeout'), left);
+          c.res.on('close', onClose);
+          set.add(done);
+        });
+        if (reason === 'closed') return null;
+        if (reason === 'shutdown') break;
+        if (reason === 'recheck') authenticate(c.req); // gesperrt, widerrufen oder abgelöst: der passende Fehler
+      }
+    } finally {
+      if (outer == null) threads.delete(sent.thread_id);
+      else threads.set(sent.thread_id, outer);
+      if (threads.size === 0) core.asking.delete(agent.id);
+    }
+    // Keine Antwort in der Wartezeit: Sie kommt später ins Postfach. Die Anwesenheit sagt, womit zu rechnen ist.
+    return [200, {
+      status: 'waiting', message_id: sent.message_id, thread_id: sent.thread_id, waited: wait,
+      recipients: recipientPresence(sent.recipients.map((r) => r.agent_id)),
+    }] as const;
   };
 
-  const unacked = (agentId: string) => shapeMessages(all<MsgRow>(
-    `${MSG_SELECT} JOIN deliveries d ON d.message_seq = m.seq
-     WHERE d.agent_id = ? AND d.acked = 0 ORDER BY m.seq LIMIT 100`, agentId));
+  // Antworten, auf die gerade ein "Fragen und warten" derselben Kennung wartet, bleiben dem Postfach fern.
+  const unacked = (agentId: string, after = 0) => {
+    const held = core.asking.get(agentId);
+    const rows = all<MsgRow & { seq: number }>(
+      `${MSG_SELECT.replace('SELECT ', 'SELECT m.seq, ')} JOIN deliveries d ON d.message_seq = m.seq
+       WHERE d.agent_id = ? AND d.acked = 0 AND m.seq > ? ORDER BY m.seq LIMIT 100`, agentId, after);
+    return shapeMessages(held ? rows.filter((r) => !(held.has(r.thread_id) && r.seq > held.get(r.thread_id)!)) : rows);
+  };
 
   const inbox = async (c: Ctx) => {
     const agent = authenticate(c.req);
@@ -378,6 +446,7 @@ export function createApi(core: Core) {
         : route === 'GET /me' ? ([200, me(authenticate(c.req, { pending: true }))] as const)
         : route === 'GET /agents' ? listAgents(c)
         : route === 'POST /messages' ? sendMessage(c)
+        : route === 'POST /ask' ? await ask(c)
         : route === 'GET /inbox' ? await inbox(c)
         : route === 'POST /inbox/ack' ? ack(c)
         : route === 'GET /threads' ? listThreads(c)
