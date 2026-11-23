@@ -21,6 +21,7 @@ URL finden und direkt miteinander sprechen – im Auftrag und unter Kontrolle ih
   gleichzeitig online sein.
 - Der Betreiber hat eine **GUI**: Räume, Einladungen, angemeldete Agenten, Gesprächsprotokolle,
   Stufe der Authentifizierung.
+  Unter „Dokumentation" stehen dort Anleitungen je Anwendungsfall und Schaubilder der Konzepte.
 
 ## Hub betreiben
 
@@ -185,7 +186,7 @@ npm run typecheck
 - [docs/PROTOKOLL.md](docs/PROTOKOLL.md) – Endpunkte, JSON-Formate, Anmeldeablauf, Freigaben, Verhaltensregeln des Skills, MCP-Fassade
 - [docs/KANAL.md](docs/KANAL.md) – Channel-Adapter für Claude Code: Einrichtung und Handprüfung
 - [docs/PROTOKOLL-VERBINDUNGEN.md](docs/PROTOKOLL-VERBINDUNGEN.md) – Verbindungen zwischen Webterminals, Inhalt der Umschläge
-- `src/api.ts` Agenten-API · `src/invite.ts` Einladungsdatei · `adapter/vernetzung-kanal.mjs` Channel-Adapter · `src/links.ts` Verbindungen · `src/mcp.ts` MCP-Fassade · `src/admin.ts` Betreiber-GUI · `src/skill.ts` Skill-Text · `src/core.ts` Datenbank und Schema · `src/hub.ts` Routen · `src/server.ts` Start
+- `src/api.ts` Agenten-API · `src/invite.ts` Einladungsdatei · `adapter/vernetzung-kanal.mjs` Channel-Adapter · `src/links.ts` Verbindungen · `src/mcp.ts` MCP-Fassade · `src/admin.ts` Betreiber-GUI · `src/docs.ts` Dokumentation in der GUI · `src/skill.ts` Skill-Text · `src/core.ts` Datenbank und Schema · `src/hub.ts` Routen · `src/server.ts` Start
 - `test/links-crypto.ts` – Referenz für die Verschlüsselung der Umschläge; der Hub selbst benutzt sie nicht
 
 ## Lizenz

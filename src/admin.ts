@@ -7,6 +7,7 @@ import type { Agent, Core, Person, Room } from './core.ts';
 import { LINK_KEY_LINKS_DEFAULT } from './links.ts';
 import type { LinkLimit, Links } from './links.ts';
 import { invitationFile, invitationFilename } from './invite.ts';
+import { DOCS_CSS, docPage, docPages, docsIndex } from './docs.ts';
 
 const h = (v: unknown) =>
   String(v ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
@@ -175,9 +176,9 @@ export function createAdmin(core: Core, links: Links) {
 <html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${h(title)} – Vernetzung</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="${FONTS}" rel="stylesheet"><style>${CSS}</style><script src="/admin/app.js"></script></head><body>
+<link href="${FONTS}" rel="stylesheet"><style>${CSS}${DOCS_CSS}</style><script src="/admin/app.js"></script></head><body>
 ${loggedIn ? `<header><div class="bar"><a class="brand" href="/admin">${LOGO}<span><b>Vernetzung</b><small>Betreiber</small></span></a>
-<nav><a href="/admin"${area === 'rooms' ? ' aria-current="page"' : ''}>Räume</a><a href="/admin/persons"${area === 'persons' ? ' aria-current="page"' : ''}>Personen</a><a href="/admin/links"${area === 'links' ? ' aria-current="page"' : ''}>Verbindungen</a></nav>
+<nav><a href="/admin"${area === 'rooms' ? ' aria-current="page"' : ''}>Räume</a><a href="/admin/persons"${area === 'persons' ? ' aria-current="page"' : ''}>Personen</a><a href="/admin/links"${area === 'links' ? ' aria-current="page"' : ''}>Verbindungen</a><a href="/admin/docs"${area === 'docs' ? ' aria-current="page"' : ''}>Dokumentation</a></nav>
 <button type="button" class="pill" data-theme-toggle>${SUN}<span>Dunkel</span></button>
 <form method="post" action="/admin/logout"><button>Abmelden</button></form></div></header>` : ''}
 <main>${content}</main></body></html>`;
@@ -542,6 +543,14 @@ ${error ? `<div class="note">${h(error)}</div>` : ''}
         core.setSetting('retention_days', String(days));
         core.cleanup();
         return redirect(res, '/admin');
+      }
+
+      if (req.method === 'GET' && (path === '/admin/docs' || path.startsWith('/admin/docs/'))) {
+        const pages = docPages(core.baseUrl(req));
+        if (path === '/admin/docs') return html(res, 200, page('Dokumentation', docsIndex(pages), true, 'docs'));
+        const doc = pages.find((p) => `/admin/docs/${p.slug}` === path);
+        if (!doc) throw new HttpError(404, 'not_found', 'Diese Seite gibt es nicht.');
+        return html(res, 200, page(doc.title, docPage(doc, pages), true, 'docs'));
       }
 
       if (path === '/admin/persons' && req.method === 'GET') return html(res, 200, personsPage());
