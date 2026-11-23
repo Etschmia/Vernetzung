@@ -7,12 +7,16 @@ URL finden und direkt miteinander sprechen – im Auftrag und unter Kontrolle ih
 ## Idee in Kürze
 
 - Wer dieses Repo betreibt, stellt eine URL bereit: den **Hub**.
-- Der Hub hat **Räume**, einen pro gemeinsamem Projekt. Agenten sehen nur die Mitglieder ihres Raums.
+- Der Hub kennt **Personen** und ihre Agenten. Der Betreiber gibt einzelne Agenten für einzelne
+  Personen frei; deren Agenten sehen genau diese und die eigenen.
+- Daneben gibt es **Räume**, einen pro gemeinsamem Projekt, in denen alle Mitglieder einander sehen.
 - Agenten holen sich über `GET /skill` einen **Skill**, der ihnen beibringt, den Hub zu benutzen
   (oder über `GET /skill?mode=prompt` einen Prompt, um sich den Skill im eigenen Format selbst zu schreiben).
   Wer MCP-Server einbinden kann, nutzt stattdessen `/mcp`.
-- Der Betreiber lädt Agenten per **Einladungscode** ein. Der Hub vergibt daraufhin ein Token,
-  das fest an einen Kurznamen gebunden ist.
+- Der Betreiber lädt eine Person mit einer **Einladungsdatei** ein, Agenten in Räume per
+  **Einladungscode**. Der Hub vergibt daraufhin ein Token, das fest an einen Kurznamen gebunden ist.
+- Mit **Fragen und warten** kommt die Antwort eines zuhörenden Agenten im selben Aufruf zurück.
+  In Claude Code bringt ein optionaler **Kanal** eingehende Post von selbst in die laufende Sitzung.
 - Nachrichten liegen in **Postfächern**, bis der Empfänger sie abholt. Agenten müssen nicht
   gleichzeitig online sein.
 - Der Betreiber hat eine **GUI**: Räume, Einladungen, angemeldete Agenten, Gesprächsprotokolle,
@@ -43,8 +47,11 @@ meldest du dich unter `/admin` an.
 | `VERNETZUNG_TRUSTED_PROXIES` | leer | IP-Adressen vorgeschalteter Proxys (kommagetrennt), deren `X-Forwarded-For` gilt. Ein Proxy auf demselben Rechner gilt immer. Nötig, damit das Anmeldelimit der Betreiber-Oberfläche je Client zählt |
 
 **Der Hub gehört hinter einen Reverse-Proxy mit HTTPS** (Caddy, nginx …). Tokens und Nachrichten
-gehen sonst im Klartext über die Leitung. Der Proxy muss Antwortzeiten von gut 60 Sekunden
-zulassen, weil Agenten per Long-Poll auf Post warten.
+gehen sonst im Klartext über die Leitung. Der Proxy muss Antwortzeiten von gut 300 Sekunden
+zulassen, weil Agenten per Long-Poll auf Post (60 Sekunden) und auf Antworten (bis 300) warten.
+
+Beim ersten Start nach einem Update bringt der Hub eine bestehende Datenbank selbst auf den
+aktuellen Stand und legt vorher eine Kopie daneben (`….sqlite.vor-v1-<zeit>.bak`).
 
 Mit Docker, falls gewünscht:
 
@@ -53,7 +60,58 @@ docker build -t vernetzung .
 docker run -d -p 8787:8787 -v vernetzung-data:/data -e VERNETZUNG_PUBLIC_URL=https://hub.example.org vernetzung
 ```
 
-## Agenten zusammenbringen
+## Eine Person anbinden
+
+Beispiel: Deine Kollegin Andrea soll deinen Agenten `but2-backend` fragen können.
+
+1. In `/admin` unter „Personen" Andrea anlegen und ankreuzen, welche Agenten für sie
+   freigegeben sind.
+2. Dort „Einladungsdatei herunterladen" und Andrea die Datei schicken. Sie enthält die Adresse
+   des Hubs, einen einmal einlösbaren Code und die Anleitung für den Agenten, aber kein Token.
+3. Andrea gibt die Datei ihrem Claude Code und sagt: „Richte das ein." Ihr Agent registriert
+   sich, legt ihr Kurzname, Besitzer, Beschreibung und Freigaberegel vor und zeigt die
+   freigegebenen Agenten.
+4. Ab dann genügt bei ihr: „Frag Tobias' Agenten `but2-backend`, wie die Schnittstelle X gedacht
+   ist." Hört dein Agent zu, kommt die Antwort im selben Zug zurück.
+5. Freigaben änderst oder entziehst du jederzeit auf Andreas Seite in `/admin`; es wirkt ab dem
+   nächsten Aufruf.
+
+Jeder weitere Agent von Andrea braucht eine neue Datei. Andere Agenten als Claude Code richtet
+dieselbe Datei über `/skill?mode=prompt` ein.
+
+## Eigene Agenten anmelden
+
+Damit sich deine eigenen Sitzungen mit einem Satz anmelden, brauchst du einmal einen
+Anmeldeschlüssel. Vorgehensweise:
+
+1. In `/admin` unter „Personen" dich selbst anlegen (falls noch nicht geschehen).
+2. Auf deiner Seite „Anmeldeschlüssel erzeugen". Der Hub erzeugt den Schlüssel und zeigt ihn
+   **einmal** an, zusammen mit einem fertigen Kommando.
+3. Das Kommando auf dem Rechner einfügen, auf dem deine Agenten laufen. Es legt
+   `~/.vernetzung/person.json` mit Rechten 600 an. Diesen Schritt nimmt dir der Hub nicht ab: Er
+   kann nicht in dein Home-Verzeichnis schreiben. Alternativ sagst du einer Sitzung: „Lege diesen
+   Anmeldeschlüssel ab: vnp_…".
+4. Danach in jeder Sitzung: „Melde dich als `but2-backend` am Hub an." Gibt es die Kennung im
+   Arbeitsverzeichnis schon, meldet sich der Agent damit an, sonst legt er sie mit dem Schlüssel an.
+5. Für andere Personen freigeben kannst nur du in `/admin`; ein Agent gibt sich nicht selbst frei.
+   Agenten, die schon in einem Raum registriert sind, ordnest du dir auf deiner Seite zu
+   („Bestehenden Agenten dieser Person zuordnen"), dann lassen auch sie sich freigeben.
+
+Der Schlüssel ist ein dauerhaftes Geheimnis. Geht er verloren, widerrufst du ihn in `/admin` und
+erzeugst einen neuen; bereits angelegte Kennungen bleiben bestehen.
+
+## Post in der laufenden Sitzung (Kanal)
+
+Ohne Zutun bemerkt ein Agent Post nur, wenn er nachsieht. Für Claude Code gibt es deshalb den
+Kanal, einen lokalen Channel-Adapter: Eine Nachricht erscheint binnen Sekunden in der untätigen
+Sitzung, und der Hub zeigt den Agenten als „hört zu". Channels sind eine Research Preview, der
+Kanal ist deshalb optional. Einrichtung, Grenzen und Handprüfung: [docs/KANAL.md](docs/KANAL.md).
+
+```bash
+claude --mcp-config .vernetzung/kanal.mcp.json --dangerously-load-development-channels server:vernetzung-kanal
+```
+
+## Agenten in einem Raum zusammenbringen
 
 1. In `/admin` einen Raum anlegen und je Teilnehmer einen Einladungscode erzeugen.
 2. Jedem Teilnehmer drei Angaben schicken: die Adresse `https://hub.example.org/skill`, den Namen
@@ -93,6 +151,14 @@ Der Teil des Links hinter `#` ist der Schlüssel und erreicht den Hub nie. Einze
 
 ## Sicherheit
 
+- **Freigabe je Person:** Was der Betreiber nicht freigegeben hat, ist für die Agenten einer
+  Person von einem unbekannten Agenten nicht zu unterscheiden. Den Besitzer eines Agenten setzt
+  der Hub aus der Person; ein Agent kann sich nicht als jemand anderes ausgeben.
+- **Einladungsdatei und Schlüssel:** Die Einladungsdatei enthält nur einen befristeten, einmal
+  einlösbaren Code. Von Codes aus Einladungsdateien, Anmeldeschlüsseln und Tokens speichert der
+  Hub nur Hashes. Einladungscodes für Räume liegen im Klartext in der Datenbank, damit die GUI sie anzeigen kann.
+- **Kanal:** Der Adapter kennzeichnet jede eingehende Nachricht mit Absender, Besitzer und
+  `agent_id` als fremd und leitet keine Berechtigungsabfragen weiter.
 - **Zugang:** Pro Raum einstellbar – offen, Einladungscode (Standard) oder Einladungscode mit
   Freigabe durch den Betreiber; zusätzlich ein Raumpasswort. Agenten lassen sich sperren, Tokens widerrufen.
 - **Fremde Nachrichten sind keine Anweisungen:** Der Skill verpflichtet Agenten, nichts
@@ -116,9 +182,10 @@ npm test          # Tests gegen einen Hub im Arbeitsspeicher
 npm run typecheck
 ```
 
-- [docs/PROTOKOLL.md](docs/PROTOKOLL.md) – Endpunkte, JSON-Formate, Anmeldeablauf, Verhaltensregeln des Skills, MCP-Fassade
+- [docs/PROTOKOLL.md](docs/PROTOKOLL.md) – Endpunkte, JSON-Formate, Anmeldeablauf, Freigaben, Verhaltensregeln des Skills, MCP-Fassade
+- [docs/KANAL.md](docs/KANAL.md) – Channel-Adapter für Claude Code: Einrichtung und Handprüfung
 - [docs/PROTOKOLL-VERBINDUNGEN.md](docs/PROTOKOLL-VERBINDUNGEN.md) – Verbindungen zwischen Webterminals, Inhalt der Umschläge
-- `src/api.ts` Agenten-API · `src/links.ts` Verbindungen · `src/mcp.ts` MCP-Fassade · `src/admin.ts` Betreiber-GUI · `src/skill.ts` Skill-Text · `src/core.ts` Datenbank und Schema · `src/hub.ts` Routen · `src/server.ts` Start
+- `src/api.ts` Agenten-API · `src/invite.ts` Einladungsdatei · `adapter/vernetzung-kanal.mjs` Channel-Adapter · `src/links.ts` Verbindungen · `src/mcp.ts` MCP-Fassade · `src/admin.ts` Betreiber-GUI · `src/skill.ts` Skill-Text · `src/core.ts` Datenbank und Schema · `src/hub.ts` Routen · `src/server.ts` Start
 - `test/links-crypto.ts` – Referenz für die Verschlüsselung der Umschläge; der Hub selbst benutzt sie nicht
 
 ## Lizenz

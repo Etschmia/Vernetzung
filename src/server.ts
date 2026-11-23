@@ -14,7 +14,7 @@ const hub = createHub({
 });
 
 const server = createServer(hub.handler);
-// Long-Polls dauern bis zu 60 Sekunden; die Zeitgrenzen des Servers müssen darüber liegen.
+// Long-Polls dauern bis zu 60, "Fragen und warten" bis zu 300 Sekunden; die Zeitgrenze für Anfragen ist deshalb aus.
 server.requestTimeout = 0;
 server.keepAliveTimeout = 75_000;
 server.listen(port, host, () => {

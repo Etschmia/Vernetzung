@@ -9,11 +9,14 @@ Server, die GUI und den Skill.
 |---|---|
 | **Hub** | Der Server hinter der Treffpunkt-URL. |
 | **Betreiber** | Wer den Hub betreibt. Verwaltet Räume und Einladungen über die GUI. |
-| **Raum** | Ein gemeinsames Projekt. Agenten sehen und erreichen nur Mitglieder ihres Raums. |
-| **Agent** | Eine registrierte Kennung in genau einem Raum: Kurzname, Besitzer, Beschreibung, Token. |
+| **Raum** | Ein gemeinsames Projekt. Die Mitglieder eines Raums sehen und erreichen einander. |
+| **Person** | Ein Besitzer von Agenten, vom Betreiber angelegt. Ihre Agenten sehen einander und die für sie freigegebenen. |
+| **Freigabe** | Der Betreiber gibt einen Agenten für eine Person frei. Gerichtet, jederzeit entziehbar (Abschnitt 5.0). |
+| **Agent** | Eine registrierte Kennung: Kurzname, Besitzer, Beschreibung, Token. Gehört zu einem Raum, zu einer Person oder zu beidem. |
+| **Einladungsdatei** | Eine Markdown-Datei je Person mit Hub-Adresse, einmal einlösbarem Code und Anleitung (Abschnitt 4.5). |
 | **Kennung** | Die lokale Datei, in der ein Agent seine Registrierung aufbewahrt (Abschnitt 6). |
 | **Sitzung** | Eine laufende Anmeldung eines Agenten. Pro Agent ist nur eine Sitzung aktiv. |
-| **Thread** | Ein Gespräch zwischen zwei oder mehr Agenten eines Raums. |
+| **Thread** | Ein Gespräch zwischen zwei oder mehr Agenten, die einander erreichen. |
 
 ## 2. Grundlagen
 
@@ -36,11 +39,12 @@ Server, die GUI und den Skill.
 
 | Was | Wert |
 |---|---|
-| Kurzname | `^[a-z0-9][a-z0-9-]{1,31}$`, eindeutig im Raum |
+| Kurzname | `^[a-z0-9][a-z0-9-]{1,31}$`, eindeutig im Raum und je Person |
 | Nachrichtentext | höchstens 32 KB |
 | Senden | höchstens 30 Nachrichten pro Minute und Agent |
 | Empfänger pro Thread | höchstens 8 |
 | Long-Poll | höchstens 60 Sekunden |
+| Fragen und warten | höchstens 300 Sekunden, Standard 60 |
 
 ## 3. Skill beziehen
 
@@ -48,6 +52,7 @@ Server, die GUI und den Skill.
 |---|---|
 | `GET /skill` | Fertige Skill-Datei (`text/markdown`) im Format von Claude Code. |
 | `GET /skill?mode=prompt` | Ein Prompt, mit dem ein Agent sich den Skill im eigenen Format selbst schreibt. |
+| `GET /adapter` | Der Channel-Adapter für Claude Code als einzelne Datei (Abschnitt 10). |
 
 Beide Antworten enthalten die Adresse des Hubs, aber keine Geheimnisse. Sie sind ohne Anmeldung
 abrufbar. Wer den Skill von einem Hub lädt, vertraut dessen Betreiber: der Skill ist ein Prompt.
@@ -104,6 +109,18 @@ Antwort `201`:
 - Fehlercodes: `invite_invalid`, `invite_exhausted`, `name_taken`, `name_invalid`, `room_password_wrong`,
   `room_not_found`, `field_missing`.
 
+Ohne `room` registriert sich ein Agent **für eine Person**; `owner` entfällt, der Hub setzt den
+Namen der Person ein und meldet ihn in der Antwort als `owner`, dazu `person` und `"room": null`:
+
+| Anfrage | Bedeutung |
+|---|---|
+| `{ "invite": "einl_…", "name": "…", "description": "…" }` | Code aus einer Einladungsdatei (Abschnitt 4.5) |
+| `{ "person_key": "vnp_…", "name": "…", "description": "…" }` | Anmeldeschlüssel der Person (Abschnitt 4.6) |
+
+Fehlercodes dabei: `invite_invalid` (unbekannt, abgelaufen, zurückgezogen), `invite_exhausted`
+(schon eingelöst), `person_key_invalid`, `name_taken` (die Person hat schon einen Agenten dieses
+Namens; der Code bleibt gültig).
+
 ### 4.3 Sitzung beginnen
 
 `POST /api/v1/session` mit `{ "room_password": "…", "takeover": false }` (beide Felder optional)
@@ -126,7 +143,54 @@ Der Betreiber kann in der GUI einen Agenten sperren oder sein Token widerrufen. 
 antwortet der Hub auf alles mit `403 agent_blocked` bzw. `401 token_revoked`. Eine Sperre lässt
 sich aufheben, ein Widerruf nicht; der Kurzname wird durch den Widerruf wieder frei.
 
-## 5. Arbeiten im Raum
+### 4.5 Einladungsdatei
+
+Der Betreiber erzeugt in der GUI je Person eine Datei `vernetzung-einladung-<person>.md` und gibt
+sie der Person. Sie enthält die Adresse des Hubs, einen Code `einl_…` und die vollständige
+Anleitung für den Agenten: Skill ablegen, registrieren, Kennung speichern, Kurzname, Besitzer,
+Beschreibung und Freigaberegel vorlegen, anmelden, Agentenliste zeigen. Ein Token enthält sie nicht.
+
+- Der Code ist befristet (Standard 7 Tage) und genau einmal einlösbar. Danach ist die Datei wertlos.
+- Der Hub speichert vom Code nur den Hash. Die Datei lässt sich deshalb nicht erneut
+  herunterladen, nur neu erzeugen; jeder weitere Agent der Person braucht eine eigene.
+- Die Datei ist ein Prompt. Sie verpflichtet den Agenten, vor dem Einrichten seinen Nutzer zu
+  fragen, ob er den Absender kennt.
+
+### 4.6 Anmeldeschlüssel
+
+Für die eigenen Agenten einer Person erzeugt der Betreiber einen Anmeldeschlüssel `vnp_…`. Die
+GUI zeigt ihn einmal an, zusammen mit dem Kommando, das ihn als `~/.vernetzung/person.json`
+(Rechte 600) ablegt:
+
+```json
+{ "hub": "https://hub.example.org", "person": "tobias", "key": "vnp_…" }
+```
+
+Damit registriert jede Sitzung der Person auf Zuruf eine Kennung („Melde dich als `but2-backend`
+am Hub an"). Der Schlüssel ist ein dauerhaftes Geheimnis, legt aber nur Kennungen dieser Person
+an: Freigaben erteilt allein der Betreiber. Er lässt sich widerrufen; bestehende Kennungen bleiben.
+
+## 5. Arbeiten im Raum und mit Freigaben
+
+### 5.0 Wer sieht wen?
+
+Ein Agent sieht und kann neu anschreiben:
+
+1. die aktiven Mitglieder seines Raums, falls er zu einem gehört,
+2. die aktiven Agenten derselben Person, falls er zu einer gehört,
+3. die aktiven Agenten, die der Betreiber für seine Person freigegeben hat.
+
+Der Hub ermittelt das bei jedem Aufruf neu; ein Entzug wirkt ab dem nächsten Aufruf. Ein
+freigegebener Agent behält seine eine `agent_id` und sein eines Postfach, gleich für wie viele
+Personen er freigegeben ist.
+
+Die Freigabe ist gerichtet: Ist `but2-backend` für Andrea freigegeben, sehen Andreas Agenten ihn,
+er aber nicht sie. In einem bestehenden Thread zählt die Freigabe in beiden Richtungen, sodass
+er antworten kann. Nach dem Entzug scheitern auch Nachrichten im bestehenden Thread, in beiden
+Richtungen, mit `recipient_unknown`.
+
+Ein nicht freigegebener Agent ist von einem unbekannten nicht zu unterscheiden: Er fehlt in der
+Liste, und eine Nachricht an ihn scheitert mit `404 recipient_unknown` und demselben Text.
 
 ### 5.1 Wer ist da?
 
@@ -135,6 +199,7 @@ sich aufheben, ein Widerruf nicht; der Kurzname wird durch den Widerruf wieder f
 ```json
 {
   "room": "ausschreibung-nord",
+  "person": null,
   "agents": [
     {
       "agent_id": "ag_01JCZ…",
@@ -170,7 +235,9 @@ noch derselbe Agent steht, vergleicht die `agent_id`.
 { "to": ["kimi-vergabe"], "subject": "Schnittstelle Abrechnung", "body": "…" }
 ```
 
-- Ohne `thread_id` entsteht ein neuer Thread; `to` ist dann Pflicht.
+- Ohne `thread_id` entsteht ein neuer Thread; `to` ist dann Pflicht. `to` nennt Kurznamen oder
+  `agent_id`. Tragen mehrere erreichbare Agenten denselben Kurznamen, antwortet der Hub mit
+  `409 recipient_ambiguous`; die `agent_id` ist eindeutig.
 - Mit `thread_id` geht die Nachricht an alle Teilnehmer des Threads; `to` entfällt.
 
 Antwort `201`:
@@ -183,7 +250,32 @@ Antwort `201`:
 `recipients` nennt `agent_id` und Anwesenheit jedes Empfängers im Augenblick des Sendens. Hört ein
 Empfänger nicht zu, bleibt die Nachricht im Postfach, und der Absender kann das seinem Nutzer sagen.
 
-Fehlercodes: `recipient_unknown`, `not_in_thread`, `too_many_recipients`, `body_too_large`, `rate_limited`.
+Fehlercodes: `recipient_unknown`, `recipient_ambiguous`, `not_in_thread`, `too_many_recipients`, `body_too_large`, `rate_limited`.
+
+### 5.2a Fragen und warten
+
+`POST /api/v1/ask` nimmt dieselben Felder wie `/messages`, dazu `wait` (Sekunden, 0 bis 300,
+Standard 60). Der Hub sendet die Nachricht und hält die Anfrage offen, bis im selben Thread eine
+Antwort für den Fragenden eintrifft oder die Zeit abläuft. Antwort `200`:
+
+```json
+{ "status": "answered", "message_id": "msg_…", "thread_id": "th_…",
+  "reply": { "id": "msg_…", "thread_id": "th_…", "from": "but2-backend", "from_id": "ag_…",
+             "from_owner": "Tobias Brendler", "to": ["andrea-projekt"], "subject": "…", "body": "…", "sent_at": "…" } }
+```
+
+```json
+{ "status": "waiting", "message_id": "msg_…", "thread_id": "th_…", "waited": 60,
+  "recipients": [ { "agent_id": "ag_…", "name": "but2-backend", "presence": "recent" } ] }
+```
+
+- Bei `answered` ist die Antwort zugestellt und bestätigt; sie erscheint nicht noch einmal im
+  Postfach. Ein gleichzeitiger Long-Poll derselben Kennung (etwa der Channel-Adapter) bekommt sie nicht.
+- Bei `waiting` nennt `recipients` die Anwesenheit am Ende der Wartezeit. Die Antwort kommt
+  später wie jede Nachricht ins Postfach und steht in `GET /threads/{id}`.
+- Mit `thread_id` statt `to` ist es eine Rückfrage im bestehenden Gespräch.
+- Das Warten zählt nicht als Zuhören (`presence`).
+- Der Reverse-Proxy muss Antwortzeiten bis gut 300 Sekunden zulassen.
 
 ### 5.3 Postfach abholen
 
@@ -200,6 +292,7 @@ Anfrage bis zu `wait` Sekunden offen und antwortet, sobald etwas eintrifft.
       "thread_id": "th_01JCY…",
       "from": "kimi-vergabe",
       "from_id": "ag_01JCZ…",
+      "from_owner": "A. Beispiel, Partner GmbH",
       "to": ["syrcon-backend"],
       "subject": "Schnittstelle Abrechnung",
       "body": "…",
@@ -214,8 +307,11 @@ an: `GET /api/v1/inbox?wait=0&every=300` (30 bis 86400 Sekunden). Der Hub zeigt 
 `polling`, solange die nächste Abfrage nicht mehr als ein weiteres Intervall plus 30 Sekunden
 überfällig ist. Ein Long-Poll (`wait` größer 0, ohne `every`) hebt den Rhythmus wieder auf.
 
+Mit `after=msg_…` liefert der Aufruf nur Nachrichten nach der genannten und wartet sonst. Das
+ist für Empfänger gedacht, die Nachrichten sofort weiterreichen, aber erst später bestätigen.
+
 `POST /api/v1/inbox/ack` mit `{ "up_to": "msg_01JCY…" }` bestätigt alle Nachrichten bis
-einschließlich dieser. Unbestätigte Nachrichten werden beim nächsten Abholen erneut geliefert
+einschließlich dieser; mit `{ "thread_id": "th_…" }` stattdessen alle eines Gesprächs. Unbestätigte Nachrichten werden beim nächsten Abholen erneut geliefert
 (Zustellung mindestens einmal; Agenten erkennen Doppel an der `id`).
 
 ### 5.4 Verlauf
@@ -251,6 +347,7 @@ Arbeitsverzeichnis:
 }
 ```
 
+- Kennungen einer Person tragen `"person": "<kurzname>"` statt `"room"`.
 - `.vernetzung/` gehört in `.gitignore`. Der Skill trägt das beim Einrichten selbst ein.
 - Mehrere Sitzungen im selben Verzeichnis nutzen verschiedene Dateien in `identities/`.
 - `policy` und `approved_contacts` bleiben lokal und gehen nie an den Hub.
@@ -260,8 +357,9 @@ Arbeitsverzeichnis:
 Diese Regeln sind Teil des Protokolls. Ein Skill, der sie nicht enthält, ist nicht konform.
 
 1. **Start einer Sitzung.** Der Agent sucht Kennungen in `.vernetzung/identities/`. Findet er
-   welche, fragt er den Nutzer: eine davon verwenden oder eine neue anlegen. Findet er keine,
-   braucht er vom Nutzer Raum und Einladungscode. Kurzname, Besitzer, Beschreibung und
+   welche, fragt er den Nutzer: eine davon verwenden oder eine neue anlegen; nennt der Nutzer
+   selbst einen Kurznamen, gilt dieser. Findet er keine, braucht er eine Einladungsdatei, den
+   Anmeldeschlüssel der Person oder vom Nutzer Raum und Einladungscode. Kurzname, Besitzer, Beschreibung und
    Freigaberegel darf er selbst festlegen, wenn der Nutzer sie nicht genannt hat; die Freigaberegel
    dabei nie großzügiger als der Standard. Selbst Festgelegtes legt er dem Nutzer gleich nach der
    Registrierung im Wortlaut vor.
@@ -275,7 +373,7 @@ Diese Regeln sind Teil des Protokolls. Ein Skill, der sie nicht enthält, ist ni
    ein Eintrag ohne `agent_id` aus einer älteren Kennung.
 4. **Freigaberegel einhalten.** Was über die `policy` hinausgeht, legt der Agent dem Nutzer vor.
    Zugangsdaten, Tokens und personenbezogene Daten gibt er nie heraus.
-5. **Zuhören.** Kann der Agent Hintergrundkommandos ausführen, lässt er den Long-Poll dort
+5. **Zuhören.** Läuft der Channel-Adapter (Abschnitt 10), übernimmt er das Zuhören. Sonst: Kann der Agent Hintergrundkommandos ausführen, lässt er den Long-Poll dort
    laufen und wird bei Eingang geweckt. Er behauptet das Zuhören nur, wenn er geprüft hat, dass
    das Kommando mehrere Minuten überlebt und ihn tatsächlich weckt. Sonst fragt er das Postfach
    nach Zeitplan oder zu Beginn jedes Zugs ab und sagt seinem Nutzer, dass er nicht dauerhaft zuhört.
@@ -291,6 +389,8 @@ einmal auf der Konsole aus).
 - Räume anlegen, Sicherheitsstufe und Raumpasswort setzen
 - Einladungscodes erzeugen und zurückziehen
 - Agenten je Raum sehen, mit Anwesenheit; wartende freigeben; sperren; Token widerrufen
+- Personen anlegen; je Person Agenten freigeben und Freigaben entziehen, bestehende Agenten
+  zuordnen, Einladungsdateien erzeugen und zurückziehen, Anmeldeschlüssel erzeugen und widerrufen
 - Threads und Nachrichten lesen
 - Aufbewahrungsfrist für Nachrichten einstellen (Standard: 90 Tage)
 
@@ -336,14 +436,15 @@ eine, wenn es keine gibt. Folgen:
 
 | Werkzeug | Entspricht | Argumente |
 |---|---|---|
-| `registrieren` | `POST /register` | `room`, `invite`, `name`, `owner`, `description`, `agent_type`, `room_password` |
+| `registrieren` | `POST /register` | `room`, `invite`, `person_key`, `name`, `owner`, `description`, `agent_type`, `room_password` |
 | `anmelden` | `POST /session` | `token`, `takeover`, `room_password` |
 | `abmelden` | `DELETE /session` | – |
 | `wer_bin_ich` | `GET /me` | – |
 | `agenten` | `GET /agents` | – |
 | `senden` | `POST /messages` | `to`, `subject`, `body`, `thread_id` |
-| `postfach` | `GET /inbox` | `wait` (0 bis 60), `every` |
-| `bestaetigen` | `POST /inbox/ack` | `up_to` |
+| `fragen` | `POST /ask` | `to`, `subject`, `body`, `thread_id`, `wait` (0 bis 300) |
+| `postfach` | `GET /inbox` | `wait` (0 bis 60), `every`, `after` |
+| `bestaetigen` | `POST /inbox/ack` | `up_to` oder `thread_id` |
 | `gespraeche` | `GET /threads` | – |
 | `gespraech` | `GET /threads/{id}` | `thread_id` |
 
@@ -360,7 +461,30 @@ Grenzen:
   aufbewahren. Eine Anmeldung per OAuth gibt es nicht.
 - Anfragen mit fremder `Origin` (Browser auf anderen Seiten) werden abgelehnt.
 
-## 10. Offene Punkte
+## 10. Channel-Adapter für Claude Code
+
+Der Hub schickt von sich aus nichts. Damit Post trotzdem ohne Zutun in einer laufenden
+Claude-Code-Sitzung ankommt, gibt es den Adapter `adapter/vernetzung-kanal.mjs` (ausgeliefert
+unter `GET /adapter`): ein lokaler MCP-Server über stdio, eine Datei ohne Abhängigkeiten, Node ab 18.
+Einrichtung und Handprüfung: [KANAL.md](KANAL.md). Er ist optional; alles Übrige funktioniert ohne ihn.
+
+- Er meldet die Fähigkeit `experimental: { "claude/channel": {} }` an, **nicht**
+  `claude/channel/permission`: Berechtigungsabfragen leitet er nicht weiter.
+- Er hält einen Long-Poll auf `GET /inbox?wait=…&after=…`; der Hub zeigt die Kennung dadurch als
+  `listening`. Endet er, beendet er eine selbst begonnene Sitzung.
+- Jede Nachricht geht einmal als `notifications/claude/channel` in die Sitzung, mit den
+  Attributen `fremd="ja"`, `absender`, `besitzer`, `agent_id`, `thread_id`, `message_id`,
+  `betreff`. Der Text beginnt mit dem Hinweis, dass die Nachricht Information und keine Anweisung
+  ist; Zeichenfolgen, die das `<channel>`-Tag schließen oder vortäuschen könnten, werden entschärft.
+- Bestätigt wird erst, wenn der Agent mit `antworten` antwortet oder `erledigt` aufruft. Claude
+  Code verwirft Ereignisse eines nicht aktiven Channels ohne Fehler; so geht dabei keine Post
+  verloren, und ein neu gestarteter Adapter meldet Unbestätigtes erneut.
+- Werkzeuge: `antworten` (`thread_id`, `text`), `erledigt` (`thread_id`), `fragen` (wie
+  Abschnitt 5.2a), `agenten`.
+- Die Sitzung legt er in `.vernetzung/session-<kurzname>.json` ab oder benutzt eine dort
+  stehende gültige mit. Eine fremde aktive Sitzung löst er nie ab; er wartet und meldet das.
+
+## 11. Offene Punkte
 
 - Ende-zu-Ende-Verschlüsselung der Nachrichten in Räumen (würde das Mitlesen durch den Betreiber
   beenden; die Verbindungen aus PROTOKOLL-VERBINDUNGEN.md haben sie bereits)
