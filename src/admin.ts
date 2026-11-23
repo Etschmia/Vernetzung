@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   AUTH_LEVELS, HttpError, NAME_RE, hashPassword, iso, newId, readBody, safeEqual, sha256, verifyPassword,
 } from './core.ts';
-import type { Agent, Core, Room } from './core.ts';
+import type { Agent, Core, Person, Room } from './core.ts';
 import { LINK_KEY_LINKS_DEFAULT } from './links.ts';
 import type { LinkLimit, Links } from './links.ts';
 
@@ -88,6 +88,8 @@ td.acts{text-align:right;white-space:nowrap}
 .tile{width:30px;height:30px;border-radius:9px;background:var(--secondary);color:var(--secondary-foreground);display:inline-flex;align-items:center;justify-content:center;font:700 11px var(--font-sans);flex:none}
 .who b{font-weight:600;white-space:nowrap}.who .mono{white-space:nowrap}.sub{font-size:12px;color:var(--muted-foreground)}
 input,select{height:38px;padding:0 12px;border-radius:var(--radius);border:1px solid var(--input);background:var(--card);color:var(--foreground);font:400 14px var(--font-sans);outline:none;min-width:0}
+input[type=checkbox]{height:16px;width:16px;padding:0;accent-color:var(--primary);flex:none}
+label.check{display:flex;align-items:center;gap:10px;font:400 14px var(--font-sans);color:var(--foreground)}
 input:focus,select:focus{border-color:var(--ring);box-shadow:0 0 0 3px color-mix(in oklab,var(--ring) 25%,transparent)}
 button{height:32px;padding:0 13px;border-radius:var(--radius);border:1px solid var(--border);background:var(--card);color:var(--foreground);font:600 13px var(--font-sans);cursor:pointer;display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
 button:hover{background:var(--muted)}
@@ -173,7 +175,7 @@ export function createAdmin(core: Core, links: Links) {
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="${FONTS}" rel="stylesheet"><style>${CSS}</style><script src="/admin/app.js"></script></head><body>
 ${loggedIn ? `<header><div class="bar"><a class="brand" href="/admin">${LOGO}<span><b>Vernetzung</b><small>Betreiber</small></span></a>
-<nav><a href="/admin"${area === 'rooms' ? ' aria-current="page"' : ''}>Räume</a><a href="/admin/links"${area === 'links' ? ' aria-current="page"' : ''}>Verbindungen</a></nav>
+<nav><a href="/admin"${area === 'rooms' ? ' aria-current="page"' : ''}>Räume</a><a href="/admin/persons"${area === 'persons' ? ' aria-current="page"' : ''}>Personen</a><a href="/admin/links"${area === 'links' ? ' aria-current="page"' : ''}>Verbindungen</a></nav>
 <button type="button" class="pill" data-theme-toggle>${SUN}<span>Dunkel</span></button>
 <form method="post" action="/admin/logout"><button>Abmelden</button></form></div></header>` : ''}
 <main>${content}</main></body></html>`;
@@ -242,12 +244,12 @@ ${loggedIn ? `<header><div class="bar"><a class="brand" href="/admin">${LOGO}<sp
 <button>Speichern</button></form></section>`);
   };
 
-  const agentsTable = (room: Room) => {
-    const agents = all<Agent>('SELECT * FROM agents WHERE room_id = ? ORDER BY status = \'revoked\', name', room.id);
+  // Tabelle der Agenten eines Raums oder einer Person. "extra" ergänzt je Agent weitere Schaltflächen.
+  const agentsTable = (agents: Agent[], action: string, extra: (a: Agent) => string = () => '') => {
     if (!agents.length) return '<p class="empty">Noch kein Agent registriert.</p>';
-    const btn = (a: Agent, action: string, label: string, cls = '', confirm = '') =>
-      `<form class="inline" method="post" action="/admin/room/${h(room.slug)}/agent"${confirm ? ` data-confirm="${h(confirm)}"` : ''}>
-       <input type="hidden" name="id" value="${h(a.id)}"><input type="hidden" name="action" value="${action}">
+    const btn = (a: Agent, act: string, label: string, cls = '', confirm = '') =>
+      `<form class="inline" method="post" action="${h(action)}"${confirm ? ` data-confirm="${h(confirm)}"` : ''}>
+       <input type="hidden" name="id" value="${h(a.id)}"><input type="hidden" name="action" value="${act}">
        <button class="${cls}">${label}</button></form>`;
     const unread = (a: Agent) =>
       one<{ n: number }>('SELECT COUNT(*) AS n FROM deliveries WHERE agent_id = ? AND acked = 0', a.id)!.n;
@@ -258,10 +260,90 @@ ${agents.map((a) => `<tr><td>${who(a.name, `<span class="mono">${h(a.agent_type)
 <td>${a.status === 'active' ? tag(core.presence(a), presenceLabel(a)) : '–'}</td>
 <td class="num">${unread(a) ? tag('pending', String(unread(a))) : '0'}</td>
 <td>${when(a.last_seen)}</td>
-<td class="acts">${a.status === 'pending' ? btn(a, 'approve', 'Freigeben', 'pri') : ''}
+<td class="acts">${extra(a)}${a.status === 'pending' ? btn(a, 'approve', 'Freigeben', 'pri') : ''}
 ${a.status === 'active' ? btn(a, 'block', 'Sperren') : ''}
 ${a.status === 'blocked' ? btn(a, 'unblock', 'Entsperren') : ''}
 ${a.status !== 'revoked' ? btn(a, 'revoke', 'Widerrufen', 'bad', `Token von ${a.name} endgültig widerrufen? Der Kurzname wird wieder frei.`) : ''}</td></tr>`).join('')}</table>`;
+  };
+  const roomAgents = (room: Room) => agentsTable(
+    all<Agent>("SELECT * FROM agents WHERE room_id = ? ORDER BY status = 'revoked', name", room.id), `/admin/room/${room.slug}/agent`);
+  const personAgents = (person: Person) => agentsTable(
+    all<Agent>("SELECT * FROM agents WHERE person_id = ? ORDER BY status = 'revoked', name", person.id), `/admin/person/${person.slug}/agent`,
+    (a) => `<form class="inline" method="post" action="/admin/person/${h(person.slug)}/unassign" data-confirm="${h(`Zuordnung von ${a.name} zu ${person.name} lösen? Seine Freigaben für andere Personen bleiben bestehen.`)}">
+      <input type="hidden" name="id" value="${h(a.id)}"><button>Zuordnung lösen</button></form>`);
+
+  // Sperren, Entsperren, Freigeben wartender Agenten und Widerruf – für Raum- und Personenseite gleich.
+  const agentAction = (agent: Agent | undefined, action: string) => {
+    const next = ({ approve: ['pending', 'active'], block: ['active', 'blocked'], unblock: ['blocked', 'active'] } as
+      Record<string, string[]>)[action];
+    if (agent && action === 'revoke' && agent.status !== 'revoked') {
+      run("UPDATE agents SET status = 'revoked', session_id = NULL, session_seen = NULL, last_poll = NULL WHERE id = ?", agent.id);
+      run('DELETE FROM shares WHERE agent_id = ?', agent.id);
+      core.wake(agent.id, 'recheck');
+    } else if (agent && next && agent.status === next[0]) {
+      run('UPDATE agents SET status = ? WHERE id = ?', next[1], agent.id);
+      core.wake(agent.id, 'recheck');
+    }
+  };
+
+  const threadsTable = (threads: { id: string; subject: string; last: number; n: number }[]) => {
+    const members = (id: string) => all<{ name: string }>(
+      'SELECT a.name FROM thread_members tm JOIN agents a ON a.id = tm.agent_id WHERE tm.thread_id = ? ORDER BY a.name', id)
+      .map((m) => h(m.name)).join(', ');
+    return threads.length ? `<table><tr><th>Betreff</th><th>Teilnehmer</th><th>Nachrichten</th><th>Letzte (UTC)</th></tr>
+${threads.map((t) => `<tr><td><a href="/admin/thread/${h(t.id)}">${h(t.subject)}</a></td><td>${members(t.id)}</td><td class="num">${t.n}</td><td>${when(t.last)}</td></tr>`).join('')}</table>`
+      : '<p class="empty">Noch keine Gespräche.</p>';
+  };
+
+  const personsPage = () => {
+    const persons = all<Person>('SELECT * FROM persons ORDER BY slug');
+    const count = (sql: string, id: number) => one<{ n: number }>(sql, id)!.n;
+    return page('Personen', `<h1>Personen</h1>
+<section><h2>So funktionieren Freigaben</h2>
+<p>Eine Person ist der Besitzer von Agenten. Ihre Agenten sehen einander und dazu genau die Agenten, die du hier für die Person freigibst –
+unabhängig von Räumen. Ein freigegebener Agent behält seine eine Kennung und sein eines Postfach, auch wenn er für mehrere Personen freigegeben ist.</p></section>
+<section>${persons.length ? `<table><tr><th>Person</th><th>Eigene Agenten</th><th>Für sie freigegeben</th></tr>
+${persons.map((p) => `<tr><td><a href="/admin/person/${h(p.slug)}">${h(p.name)}</a><div class="sub mono">${h(p.slug)}</div></td>
+<td class="num">${count("SELECT COUNT(*) AS n FROM agents WHERE person_id = ? AND status != 'revoked'", p.id)}</td>
+<td class="num">${count('SELECT COUNT(*) AS n FROM shares WHERE person_id = ?', p.id)}</td></tr>`).join('')}</table>`
+      : '<p class="empty">Noch keine Person. Lege unten die erste an – am besten dich selbst.</p>'}</section>
+<section><h2>Neue Person anlegen</h2>
+<form class="row" method="post" action="/admin/persons">
+<label>Kurzname (a–z, 0–9, Bindestrich)<input name="slug" required pattern="[a-z0-9][a-z0-9-]{1,31}"></label>
+<label>Name, wie ihn andere Agenten als Besitzer sehen<input name="name" required maxlength="200" size="36"></label>
+<button class="pri">Anlegen</button></form></section>`, true, 'persons');
+  };
+
+  const personPage = (person: Person) => {
+    const base = `/admin/person/${h(person.slug)}`;
+    // Freigeben lässt sich jeder aktive Agent, der nicht der Person selbst gehört.
+    const candidates = all<Agent & { shared: number; room: string | null; person: string | null }>(
+      `SELECT a.*, r.slug AS room, p.name AS person,
+         EXISTS (SELECT 1 FROM shares s WHERE s.agent_id = a.id AND s.person_id = ?1) AS shared
+       FROM agents a LEFT JOIN rooms r ON r.id = a.room_id LEFT JOIN persons p ON p.id = a.person_id
+       WHERE a.status = 'active' AND (a.person_id IS NULL OR a.person_id != ?1) ORDER BY a.name, a.id`, person.id);
+    const unassigned = all<Agent & { room: string | null }>(
+      `SELECT a.*, r.slug AS room FROM agents a LEFT JOIN rooms r ON r.id = a.room_id
+       WHERE a.person_id IS NULL AND a.status != 'revoked' ORDER BY a.name`);
+    const where = (a: { room: string | null; person?: string | null }) =>
+      [a.person ? h(a.person) : '', a.room ? `Raum <span class="mono">${h(a.room)}</span>` : ''].filter(Boolean).join(' · ');
+    const threads = all<{ id: string; subject: string; last: number; n: number }>(
+      `SELECT t.id, t.subject, MAX(m.sent_at) AS last, COUNT(m.seq) AS n FROM threads t JOIN messages m ON m.thread_id = t.id
+       WHERE EXISTS (SELECT 1 FROM thread_members tm JOIN agents a ON a.id = tm.agent_id WHERE tm.thread_id = t.id AND a.person_id = ?)
+       GROUP BY t.id ORDER BY last DESC LIMIT 200`, person.id);
+    return page(person.name, `<p class="back"><a href="/admin/persons">← Personen</a></p><h1>${h(person.name)} <code>${h(person.slug)}</code></h1>
+<section><h2>Freigegebene Agenten</h2>
+<p>Die Agenten von ${h(person.name)} sehen die angekreuzten Agenten und können ihnen schreiben. Ein entferntes Kreuz wirkt ab dem nächsten Aufruf.</p>
+${candidates.length ? `<form method="post" action="${base}/shares"><table><tr><th>Freigegeben</th><th>Besitzer / Aufgabe</th><th>Gehört zu</th></tr>
+${candidates.map((a) => `<tr><td><label class="check"><input type="checkbox" name="agent" value="${h(a.id)}"${a.shared ? ' checked' : ''}><b>${h(a.name)}</b></label></td>
+<td class="wide">${h(a.owner)}<div class="sub">${h(a.description)}</div></td><td>${where(a) || '–'}</td></tr>`).join('')}</table>
+<p style="margin-top:16px"><button class="pri">Freigaben speichern</button></p></form>` : '<p class="empty">Es gibt noch keinen Agenten, der sich freigeben ließe.</p>'}</section>
+<section><h2>Eigene Agenten</h2><div data-refresh="${base}/agents">${personAgents(person)}</div>
+${unassigned.length ? `<form class="row" method="post" action="${base}/assign" style="margin-top:18px">
+<label>Bestehenden Agenten dieser Person zuordnen<select name="id">${unassigned.map((a) =>
+      `<option value="${h(a.id)}">${h(a.name)}${a.room ? ` (Raum ${h(a.room)})` : ''} – ${h(a.owner)}</option>`).join('')}</select></label>
+<button>Zuordnen</button></form>` : ''}</section>
+<section><h2>Gespräche</h2>${threadsTable(threads)}</section>`, true, 'persons');
   };
 
   const roomPage = (room: Room, req: IncomingMessage) => {
@@ -270,9 +352,6 @@ ${a.status !== 'revoked' ? btn(a, 'revoke', 'Widerrufen', 'bad', `Token von ${a.
     const threads = all<{ id: string; subject: string; last: number; n: number }>(
       `SELECT t.id, t.subject, MAX(m.sent_at) AS last, COUNT(m.seq) AS n FROM threads t
        JOIN messages m ON m.thread_id = t.id WHERE t.room_id = ? GROUP BY t.id ORDER BY last DESC LIMIT 200`, room.id);
-    const members = (id: string) => all<{ name: string }>(
-      'SELECT a.name FROM thread_members tm JOIN agents a ON a.id = tm.agent_id WHERE tm.thread_id = ? ORDER BY a.name', id)
-      .map((m) => h(m.name)).join(', ');
     const base = `/admin/room/${h(room.slug)}`;
     const inviteState = (i: (typeof invites)[number]) =>
       i.revoked ? 'zurückgezogen' : i.expires_at < Date.now() ? 'abgelaufen' : i.uses >= i.max_uses ? 'eingelöst' : 'gültig';
@@ -280,7 +359,7 @@ ${a.status !== 'revoked' ? btn(a, 'revoke', 'Widerrufen', 'bad', `Token von ${a.
 <section><h2>So treten Agenten bei</h2>
 <p>Gib dem Nutzer des Agenten diese drei Angaben: die Adresse <code>${h(core.baseUrl(req))}/skill</code>,
 den Raum <code>${h(room.slug)}</code>${room.auth_level === 'open' ? '' : ' und einen Einladungscode von unten'}${room.password_hash ? ' sowie das Raumpasswort' : ''}.</p></section>
-<section><h2>Agenten</h2><div data-refresh="${base}/agents">${agentsTable(room)}</div></section>
+<section><h2>Agenten</h2><div data-refresh="${base}/agents">${roomAgents(room)}</div></section>
 <section><h2>Einladungscodes</h2>
 <form class="row" method="post" action="${base}/invites">
 <label>Einlösungen<input name="max_uses" type="number" min="1" max="100" value="1"></label>
@@ -298,18 +377,16 @@ ${invites.map((i) => `<tr><td><code>${h(i.code)}</code></td><td class="num">${i.
 <option value="keep">unverändert lassen</option><option value="set">neu setzen</option>${room.password_hash ? '<option value="clear">entfernen</option>' : ''}</select></label>
 <label>Neues Passwort<input name="password" type="password" autocomplete="new-password"></label>
 <button>Speichern</button></form></section>
-<section><h2>Gespräche</h2>${threads.length ? `<table><tr><th>Betreff</th><th>Teilnehmer</th><th>Nachrichten</th><th>Letzte (UTC)</th></tr>
-${threads.map((t) => `<tr><td><a href="/admin/thread/${h(t.id)}">${h(t.subject)}</a></td><td>${members(t.id)}</td><td class="num">${t.n}</td><td>${when(t.last)}</td></tr>`).join('')}</table>`
-      : '<p class="empty">Noch keine Gespräche.</p>'}</section>`);
+<section><h2>Gespräche</h2>${threadsTable(threads)}</section>`);
   };
 
   const threadPage = (id: string) => {
-    const t = one<{ subject: string; slug: string; title: string }>(
-      'SELECT t.subject, r.slug, r.title FROM threads t JOIN rooms r ON r.id = t.room_id WHERE t.id = ?', id);
+    const t = one<{ subject: string; slug: string | null; title: string | null }>(
+      'SELECT t.subject, r.slug, r.title FROM threads t LEFT JOIN rooms r ON r.id = t.room_id WHERE t.id = ?', id);
     if (!t) return null;
     const msgs = all<{ body: string; sent_at: number; name: string }>(
       'SELECT m.body, m.sent_at, a.name FROM messages m JOIN agents a ON a.id = m.from_agent WHERE m.thread_id = ? ORDER BY m.seq', id);
-    return page(t.subject, `<p class="back"><a href="/admin/room/${h(t.slug)}">← ${h(t.title)}</a></p><h1>${h(t.subject)}</h1>
+    return page(t.subject, `<p class="back">${t.slug ? `<a href="/admin/room/${h(t.slug)}">← ${h(t.title)}</a>` : '<a href="/admin/persons">← Personen</a>'}</p><h1>${h(t.subject)}</h1>
 <section>${msgs.map((m) => `<div class="msg">${who(m.name, when(m.sent_at))}<pre>${h(m.body)}</pre></div>`).join('')}</section>`);
   };
 
@@ -427,6 +504,53 @@ ${error ? `<div class="note">${h(error)}</div>` : ''}
         return redirect(res, '/admin');
       }
 
+      if (path === '/admin/persons' && req.method === 'GET') return html(res, 200, personsPage());
+      if (path === '/admin/persons' && req.method === 'POST') {
+        const slug = f('slug');
+        const name = f('name').slice(0, 200);
+        if (!NAME_RE.test(slug)) throw new HttpError(400, 'slug', 'Der Kurzname der Person darf nur a–z, 0–9 und Bindestrich enthalten, 2 bis 32 Zeichen.');
+        if (!name) throw new HttpError(400, 'name', 'Die Person braucht einen Namen.');
+        if (one('SELECT 1 FROM persons WHERE slug = ?', slug)) throw new HttpError(400, 'slug', 'Eine Person mit diesem Kurznamen gibt es schon.');
+        run('INSERT INTO persons (slug, name, created_at) VALUES (?, ?, ?)', slug, name, Date.now());
+        return redirect(res, `/admin/person/${slug}`);
+      }
+      const pm = /^\/admin\/person\/([a-z0-9-]+)(\/[a-z/]+)?$/.exec(path);
+      if (pm) {
+        const person = one<Person>('SELECT * FROM persons WHERE slug = ?', pm[1]);
+        if (!person) throw new HttpError(404, 'not_found', 'Diese Seite gibt es nicht.');
+        const sub = pm[2] ?? '';
+        if (sub === '' && req.method === 'GET') return html(res, 200, personPage(person));
+        if (sub === '/agents' && req.method === 'GET') return html(res, 200, personAgents(person));
+        if (req.method !== 'POST') throw new HttpError(404, 'not_found', 'Diese Seite gibt es nicht.');
+        if (sub === '/shares') {
+          // Die Auswahl ersetzt die bisherigen Freigaben; eigene Agenten der Person brauchen keine.
+          const wanted = new Set(form.getAll('agent'));
+          core.tx(() => {
+            run('DELETE FROM shares WHERE person_id = ?', person.id);
+            for (const id of wanted)
+              if (one("SELECT 1 FROM agents WHERE id = ? AND status = 'active' AND (person_id IS NULL OR person_id != ?)", id, person.id))
+                run('INSERT INTO shares (agent_id, person_id, created_at) VALUES (?, ?, ?)', id, person.id, Date.now());
+          });
+        } else if (sub === '/assign') {
+          const agent = one<Agent>("SELECT * FROM agents WHERE id = ? AND person_id IS NULL AND status != 'revoked'", f('id'));
+          if (!agent) throw new HttpError(400, 'agent', 'Dieser Agent lässt sich nicht zuordnen.');
+          if (one("SELECT 1 FROM agents WHERE person_id = ? AND name = ? AND status != 'revoked'", person.id, agent.name))
+            throw new HttpError(400, 'name', `${person.name} hat schon einen Agenten mit dem Kurznamen ${agent.name}.`);
+          core.tx(() => {
+            run('UPDATE agents SET person_id = ? WHERE id = ?', person.id, agent.id);
+            run('DELETE FROM shares WHERE agent_id = ? AND person_id = ?', agent.id, person.id);
+          });
+        } else if (sub === '/unassign') {
+          // Ein Agent ohne Raum gehört immer zu einer Person; sonst sähe und erreichte ihn niemand mehr.
+          const agent = one<Agent>('SELECT * FROM agents WHERE id = ? AND person_id = ?', f('id'), person.id);
+          if (agent && agent.room_id == null) throw new HttpError(400, 'agent', 'Ein Agent ohne Raum braucht eine Person. Widerrufe ihn stattdessen.');
+          if (agent) run('UPDATE agents SET person_id = NULL WHERE id = ?', agent.id);
+        } else if (sub === '/agent') {
+          agentAction(one<Agent>('SELECT * FROM agents WHERE id = ? AND person_id = ?', f('id'), person.id), f('action'));
+        } else throw new HttpError(404, 'not_found', 'Diese Seite gibt es nicht.');
+        return redirect(res, `/admin/person/${person.slug}`);
+      }
+
       if (path === '/admin/links' && req.method === 'GET') return html(res, 200, linksPage(req));
       if (path.startsWith('/admin/links/')) {
         if (req.method !== 'POST') throw new HttpError(404, 'not_found', 'Diese Seite gibt es nicht.');
@@ -461,7 +585,7 @@ ${error ? `<div class="note">${h(error)}</div>` : ''}
       const back = `/admin/room/${room.slug}`;
 
       if (sub === '' && req.method === 'GET') return html(res, 200, roomPage(room, req));
-      if (sub === '/agents' && req.method === 'GET') return html(res, 200, agentsTable(room));
+      if (sub === '/agents' && req.method === 'GET') return html(res, 200, roomAgents(room));
       if (req.method !== 'POST') throw new HttpError(404, 'not_found', 'Diese Seite gibt es nicht.');
 
       if (sub === '/invites') {
@@ -484,16 +608,7 @@ ${error ? `<div class="note">${h(error)}</div>` : ''}
         } else if (pwAction === 'clear') hash = null;
         run('UPDATE rooms SET auth_level = ?, password_hash = ? WHERE id = ?', level, hash, room.id);
       } else if (sub === '/agent') {
-        const agent = one<Agent>('SELECT * FROM agents WHERE id = ? AND room_id = ?', f('id'), room.id);
-        const next = ({ approve: ['pending', 'active'], block: ['active', 'blocked'], unblock: ['blocked', 'active'] } as
-          Record<string, string[]>)[f('action')];
-        if (agent && f('action') === 'revoke' && agent.status !== 'revoked') {
-          run("UPDATE agents SET status = 'revoked', session_id = NULL, session_seen = NULL, last_poll = NULL WHERE id = ?", agent.id);
-          core.wake(agent.id, 'recheck');
-        } else if (agent && next && agent.status === next[0]) {
-          run('UPDATE agents SET status = ? WHERE id = ?', next[1], agent.id);
-          core.wake(agent.id, 'recheck');
-        }
+        agentAction(one<Agent>('SELECT * FROM agents WHERE id = ? AND room_id = ?', f('id'), room.id), f('action'));
       } else throw new HttpError(404, 'not_found', 'Diese Seite gibt es nicht.');
       return redirect(res, back);
     } catch (err) {

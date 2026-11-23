@@ -20,11 +20,13 @@ export type Room = {
 };
 
 export type Agent = {
-  id: string; room_id: number; name: string; owner: string; description: string;
+  id: string; room_id: number | null; person_id: number | null; name: string; owner: string; description: string;
   agent_type: string; token_hash: string; status: string; created_at: number;
   last_seen: number | null; last_poll: number | null; poll_interval: number | null;
   session_id: string | null; session_seen: number | null;
 };
+
+export type Person = { id: number; slug: string; name: string; created_at: number };
 
 export const LISTENING_MS = 90_000;
 export const RECENT_MS = 30 * 60_000;
@@ -67,6 +69,19 @@ export function verifyPassword(pw: string, stored: string): boolean {
 export const safeEqual = (a: string, b: string) =>
   timingSafeEqual(Buffer.from(sha256(a)), Buffer.from(sha256(b)));
 
+// Agenten und Threads stehen als Funktion da, weil die Migration sie unter anderem Namen neu aufbaut.
+const AGENTS_COLUMNS = 'id, room_id, name, owner, description, agent_type, token_hash, status, created_at, last_seen, last_poll, poll_interval, session_id, session_seen';
+const AGENTS_TABLE = (name: string) => `CREATE TABLE IF NOT EXISTS ${name} (
+  id TEXT PRIMARY KEY, room_id INTEGER REFERENCES rooms(id), person_id INTEGER REFERENCES persons(id), name TEXT NOT NULL,
+  owner TEXT NOT NULL, description TEXT NOT NULL, agent_type TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE, status TEXT NOT NULL, created_at INTEGER NOT NULL,
+  last_seen INTEGER, last_poll INTEGER, poll_interval INTEGER, session_id TEXT, session_seen INTEGER);`;
+const THREADS_COLUMNS = 'id, room_id, subject, created_by, created_at';
+const THREADS_TABLE = (name: string) => `CREATE TABLE IF NOT EXISTS ${name} (
+  id TEXT PRIMARY KEY, room_id INTEGER REFERENCES rooms(id), subject TEXT NOT NULL,
+  created_by TEXT NOT NULL REFERENCES agents(id), created_at INTEGER NOT NULL);`;
+export const SCHEMA_VERSION = 1;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS admin_sessions (sid_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
@@ -78,15 +93,17 @@ CREATE TABLE IF NOT EXISTS invites (
   code TEXT PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id),
   max_uses INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0,
   expires_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS agents (
-  id TEXT PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id), name TEXT NOT NULL,
-  owner TEXT NOT NULL, description TEXT NOT NULL, agent_type TEXT NOT NULL,
-  token_hash TEXT NOT NULL UNIQUE, status TEXT NOT NULL, created_at INTEGER NOT NULL,
-  last_seen INTEGER, last_poll INTEGER, session_id TEXT, session_seen INTEGER);
+CREATE TABLE IF NOT EXISTS persons (
+  id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, created_at INTEGER NOT NULL);
+${AGENTS_TABLE('agents')}
 CREATE UNIQUE INDEX IF NOT EXISTS agents_room_name ON agents(room_id, name) WHERE status != 'revoked';
-CREATE TABLE IF NOT EXISTS threads (
-  id TEXT PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id), subject TEXT NOT NULL,
-  created_by TEXT NOT NULL REFERENCES agents(id), created_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS agents_person_name ON agents(person_id, name) WHERE person_id IS NOT NULL AND status != 'revoked';
+-- Freigabe: Die Agenten der Person sehen und erreichen diesen Agenten.
+CREATE TABLE IF NOT EXISTS shares (
+  agent_id TEXT NOT NULL REFERENCES agents(id), person_id INTEGER NOT NULL REFERENCES persons(id),
+  created_at INTEGER NOT NULL, PRIMARY KEY (agent_id, person_id));
+CREATE INDEX IF NOT EXISTS shares_person ON shares(person_id);
+${THREADS_TABLE('threads')}
 CREATE TABLE IF NOT EXISTS thread_members (
   thread_id TEXT NOT NULL REFERENCES threads(id), agent_id TEXT NOT NULL REFERENCES agents(id),
   PRIMARY KEY (thread_id, agent_id));
@@ -120,16 +137,52 @@ CREATE TABLE IF NOT EXISTS link_messages (
   box TEXT NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY (link_id, seq));
 `;
 
+// Bringt eine bestehende Datenbank auf den aktuellen Stand. Eine neue Datenbank braucht das nicht.
+function migrate(db: DatabaseSync, cfg: Config) {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents'").get()) return;
+  const columns = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name);
+  if (!columns.includes('poll_interval')) db.exec('ALTER TABLE agents ADD COLUMN poll_interval INTEGER');
+  const version = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+  if (version >= 1) return;
+
+  // Version 1: Personen und Freigaben. Agenten und Threads brauchen keinen Raum mehr; SQLite löst ein
+  // NOT NULL nur durch Neuaufbau der Tabelle. Vorher eine Kopie der Datenbank daneben legen.
+  if (cfg.dbPath !== ':memory:') {
+    const backup = `${cfg.dbPath}.vor-v1-${Date.now()}.bak`;
+    db.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`);
+    cfg.log?.(`Datenbank wird auf Version 1 gebracht. Sicherungskopie: ${backup}`);
+  }
+  db.exec('PRAGMA foreign_keys = OFF');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS persons (
+      id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, created_at INTEGER NOT NULL)`);
+    for (const [table, create, cols] of [['agents', AGENTS_TABLE, AGENTS_COLUMNS], ['threads', THREADS_TABLE, THREADS_COLUMNS]] as const) {
+      db.exec(create(`${table}_new`));
+      db.exec(`INSERT INTO ${table}_new (${cols}) SELECT ${cols} FROM ${table}`);
+      db.exec(`DROP TABLE ${table}`);
+      db.exec(`ALTER TABLE ${table}_new RENAME TO ${table}`);
+    }
+    if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('Migration: Fremdschlüssel verletzt.');
+    db.exec('PRAGMA user_version = 1');
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+}
+
 export type Core = ReturnType<typeof createCore>;
 
 export function createCore(cfg: Config) {
   if (cfg.dbPath !== ':memory:') mkdirSync(dirname(cfg.dbPath), { recursive: true });
   const db = new DatabaseSync(cfg.dbPath);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+  migrate(db, cfg);
   db.exec(SCHEMA);
-  // Nachträglich hinzugekommene Spalten für bestehende Datenbanken.
-  const columns = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name);
-  if (!columns.includes('poll_interval')) db.exec('ALTER TABLE agents ADD COLUMN poll_interval INTEGER');
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 
   const cache = new Map<string, ReturnType<DatabaseSync['prepare']>>();
   const stmt = (sql: string) => {

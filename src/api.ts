@@ -4,7 +4,7 @@ import {
   HttpError, MAX_BODY_BYTES, MAX_THREAD_MEMBERS, NAME_RE, SEND_LIMIT_PER_MINUTE, SESSION_BUSY_MS,
   iso, newId, readJson, sendJson, sha256, verifyPassword,
 } from './core.ts';
-import type { Agent, Core, Room } from './core.ts';
+import type { Agent, Core, Person, Room } from './core.ts';
 
 type Json = Record<string, unknown>;
 // Wer ruft: eine HTTP-Anfrage mit Token im Kopf oder, hubintern (MCP-Fassade), ein bereits geprüfter Agent.
@@ -41,10 +41,25 @@ export function createApi(core: Core) {
     ...presenceInfo(a), last_seen: iso(a.last_seen),
   });
 
-  const roomOf = (a: Agent) => one<Room>('SELECT * FROM rooms WHERE id = ?', a.room_id)!;
+  const roomOf = (a: Agent) => (a.room_id == null ? undefined : one<Room>('SELECT * FROM rooms WHERE id = ?', a.room_id));
+  const personOf = (a: Agent) => (a.person_id == null ? undefined : one<Person>('SELECT * FROM persons WHERE id = ?', a.person_id));
 
-  const checkRoomPassword = (room: Room, given: unknown) => {
-    if (!room.password_hash) return;
+  // Wen ein Agent sieht und neu anschreiben kann: die Mitglieder seines Raums, die Agenten derselben
+  // Person und die für seine Person freigegebenen. Wird bei jedem Aufruf neu ermittelt.
+  const visibleTo = (a: Agent) => all<Agent>(
+    `SELECT b.* FROM agents b WHERE b.status = 'active' AND (
+       b.room_id = ?1 OR b.person_id = ?2
+       OR EXISTS (SELECT 1 FROM shares s WHERE s.agent_id = b.id AND s.person_id = ?2))
+     ORDER BY b.name, b.id`, a.room_id, a.person_id);
+  // Ob zwei Agenten einander noch schreiben dürfen: wie oben, die Freigabe zählt aber in beiden
+  // Richtungen. So kann ein freigegebener Agent in einem Gespräch antworten.
+  const connected = (a: Agent, b: Agent) =>
+    (a.room_id != null && a.room_id === b.room_id) || (a.person_id != null && a.person_id === b.person_id)
+    || !!one('SELECT 1 FROM shares WHERE (agent_id = ? AND person_id = ?) OR (agent_id = ? AND person_id = ?)',
+      b.id, a.person_id, a.id, b.person_id);
+
+  const checkRoomPassword = (room: Room | undefined, given: unknown) => {
+    if (!room?.password_hash) return;
     if (typeof given !== 'string' || !verifyPassword(given, room.password_hash))
       throw new HttpError(403, 'room_password_wrong', 'Das Raumpasswort fehlt oder ist falsch.');
   };
@@ -112,7 +127,7 @@ export function createApi(core: Core) {
   const unreadCount = (agentId: string) =>
     one<{ n: number }>('SELECT COUNT(*) AS n FROM deliveries WHERE agent_id = ? AND acked = 0', agentId)!.n;
 
-  const me = (a: Agent) => ({ room: roomOf(a).slug, status: a.status, ...publicAgent(a) });
+  const me = (a: Agent) => ({ room: roomOf(a)?.slug ?? null, person: personOf(a)?.slug ?? null, status: a.status, ...publicAgent(a) });
 
   const startSession = (c: Ctx) => {
     const agent = authenticate(c.req, { session: false, pending: true });
@@ -136,23 +151,22 @@ export function createApi(core: Core) {
 
   const listAgents = (c: Ctx) => {
     const agent = authenticate(c.req);
-    const agents = all<Agent>("SELECT * FROM agents WHERE room_id = ? AND status = 'active' ORDER BY name", agent.room_id);
-    return [200, { room: roomOf(agent).slug, agents: agents.map(publicAgent) }] as const;
+    return [200, { room: roomOf(agent)?.slug ?? null, person: personOf(agent)?.slug ?? null, agents: visibleTo(agent).map(publicAgent) }] as const;
   };
 
   const memberNames = (threadId: string) =>
     all<{ id: string; name: string }>(
       'SELECT a.id, a.name FROM thread_members tm JOIN agents a ON a.id = tm.agent_id WHERE tm.thread_id = ? ORDER BY a.name', threadId);
 
-  type MsgRow = { id: string; thread_id: string; body: string; sent_at: number; subject: string; from_id: string; from_name: string };
-  const MSG_SELECT = `SELECT m.id, m.thread_id, m.body, m.sent_at, t.subject, a.id AS from_id, a.name AS from_name
+  type MsgRow = { id: string; thread_id: string; body: string; sent_at: number; subject: string; from_id: string; from_name: string; from_owner: string };
+  const MSG_SELECT = `SELECT m.id, m.thread_id, m.body, m.sent_at, t.subject, a.id AS from_id, a.name AS from_name, a.owner AS from_owner
     FROM messages m JOIN threads t ON t.id = m.thread_id JOIN agents a ON a.id = m.from_agent`;
   const shapeMessages = (rows: MsgRow[]) => {
     const members = new Map<string, { id: string; name: string }[]>();
     return rows.map((r) => {
       if (!members.has(r.thread_id)) members.set(r.thread_id, memberNames(r.thread_id));
       return {
-        id: r.id, thread_id: r.thread_id, from: r.from_name, from_id: r.from_id,
+        id: r.id, thread_id: r.thread_id, from: r.from_name, from_id: r.from_id, from_owner: r.from_owner,
         to: members.get(r.thread_id)!.filter((m) => m.id !== r.from_id).map((m) => m.name),
         subject: r.subject, body: r.body, sent_at: iso(r.sent_at),
       };
@@ -178,28 +192,38 @@ export function createApi(core: Core) {
       let recipients: string[];
       if (c.body.thread_id != null) {
         threadId = str(c.body.thread_id, 'thread_id', 64);
-        const members = one('SELECT 1 FROM threads WHERE id = ? AND room_id = ?', threadId, agent.room_id)
-          ? memberNames(threadId) : [];
+        const members = memberNames(threadId);
         if (!members.some((m) => m.id === agent.id))
           throw new HttpError(403, 'not_in_thread', 'Diesen Thread gibt es nicht oder der Agent nimmt nicht daran teil.');
         recipients = members.filter((m) => m.id !== agent.id).map((m) => m.id);
+        // Ein Entzug der Freigabe wirkt auch in laufenden Gesprächen.
+        for (const id of recipients)
+          if (!connected(agent, one<Agent>('SELECT * FROM agents WHERE id = ?', id)!))
+            throw new HttpError(404, 'recipient_unknown', 'Ein Teilnehmer dieses Gesprächs ist für dich nicht mehr erreichbar.');
       } else {
         const to = c.body.to;
         if (!Array.isArray(to) || to.length === 0)
           throw new HttpError(400, 'field_missing', 'Feld "to" fehlt: eine Liste mit mindestens einem Kurznamen.');
-        const names = [...new Set(to.map((n) => str(n, 'to', 32)))].filter((n) => n !== agent.name);
+        const names = [...new Set(to.map((n) => str(n, 'to', 64)))].filter((n) => n !== agent.name && n !== agent.id);
         if (names.length === 0) throw new HttpError(400, 'field_invalid', 'Ein Agent kann nicht nur sich selbst schreiben.');
-        if (names.length + 1 > MAX_THREAD_MEMBERS)
-          throw new HttpError(400, 'too_many_recipients', `Ein Thread hat höchstens ${MAX_THREAD_MEMBERS} Teilnehmer.`);
-        recipients = names.map((n) => {
-          const r = one<{ id: string }>("SELECT id FROM agents WHERE room_id = ? AND name = ? AND status = 'active'", agent.room_id, n);
-          if (!r) throw new HttpError(404, 'recipient_unknown', `Im Raum gibt es keinen aktiven Agenten "${n}".`);
-          return r.id;
+        const visible = visibleTo(agent).filter((v) => v.id !== agent.id);
+        // Kurzname oder agent_id. Unbekannt und nicht freigegeben sind für den Absender dasselbe.
+        const found = names.map((n) => {
+          const hits = visible.filter((v) => (n.startsWith('ag_') ? v.id === n : v.name === n));
+          if (hits.length === 0) throw new HttpError(404, 'recipient_unknown', `Es gibt keinen erreichbaren Agenten "${n}".`);
+          if (hits.length > 1)
+            throw new HttpError(409, 'recipient_ambiguous', `Den Kurznamen "${n}" tragen mehrere erreichbare Agenten. Nimm stattdessen die agent_id aus der Agentenliste.`);
+          return hits[0];
         });
+        recipients = [...new Set(found.map((r) => r.id))];
+        if (recipients.length + 1 > MAX_THREAD_MEMBERS)
+          throw new HttpError(400, 'too_many_recipients', `Ein Thread hat höchstens ${MAX_THREAD_MEMBERS} Teilnehmer.`);
         threadId = newId('th_');
         const subject = str(c.body.subject, 'subject', 200, false) || '(ohne Betreff)';
+        // Der Thread gehört zum Raum, wenn alle Teilnehmer darin sind; sonst zu keinem.
+        const roomId = found.every((r) => r.room_id === agent.room_id) ? agent.room_id : null;
         run('INSERT INTO threads (id, room_id, subject, created_by, created_at) VALUES (?, ?, ?, ?, ?)',
-          threadId, agent.room_id, subject, agent.id, now);
+          threadId, roomId, subject, agent.id, now);
         for (const id of [agent.id, ...recipients])
           run('INSERT INTO thread_members (thread_id, agent_id) VALUES (?, ?)', threadId, id);
       }
