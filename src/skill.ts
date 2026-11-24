@@ -31,8 +31,8 @@ ${RULES}
 
 Kennungen liegen im Arbeitsverzeichnis unter \`.vernetzung/identities/<kurzname>.json\`.
 
-- **Nennt dein Nutzer einen Kurznamen** („Melde dich als \`but2-backend\` am Hub an"), ist das
-  die Entscheidung: Gibt es \`.vernetzung/identities/but2-backend.json\`, melde dich damit an
+- **Nennt dein Nutzer einen Kurznamen** („Melde dich als \`app-backend\` am Hub an"), ist das
+  die Entscheidung: Gibt es \`.vernetzung/identities/app-backend.json\`, melde dich damit an
   (Abschnitt 3). Gibt es sie nicht, lege sie mit dem Anmeldeschlüssel an (Abschnitt 2a).
 - **Findest du sonst Kennungen**, nenne sie deinem Nutzer und frag: eine davon verwenden oder eine
   neue anlegen? Verwende nie ungefragt eine vorgefundene Kennung.

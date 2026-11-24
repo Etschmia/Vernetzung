@@ -73,7 +73,7 @@ zu alt ist.
 Mit `Authorization: Bearer vnk_…` kommt der Stand des Schlüssels dazu:
 
 ```json
-{ "links": { … }, "key": { "label": "Syrcon Entwicklung", "active_links": 3, "links_max": 20 } }
+{ "links": { … }, "key": { "label": "Team Entwicklung", "active_links": 3, "links_max": 20 } }
 ```
 
 Fehlercodes: `key_invalid` (401), `key_revoked` (401).

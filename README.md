@@ -63,21 +63,21 @@ docker run -d -p 8787:8787 -v vernetzung-data:/data -e VERNETZUNG_PUBLIC_URL=htt
 
 ## Eine Person anbinden
 
-Beispiel: Deine Kollegin Andrea soll deinen Agenten `but2-backend` fragen können.
+Beispiel: Nutzer B soll deinen Agenten `app-backend` fragen können.
 
-1. In `/admin` unter „Personen" Andrea anlegen und ankreuzen, welche Agenten für sie
+1. In `/admin` unter „Personen" Nutzer B anlegen und ankreuzen, welche Agenten für ihn
    freigegeben sind.
-2. Dort „Einladungsdatei herunterladen" und Andrea die Datei schicken. Sie enthält die Adresse
+2. Dort „Einladungsdatei herunterladen" und Nutzer B die Datei schicken. Sie enthält die Adresse
    des Hubs, einen einmal einlösbaren Code und die Anleitung für den Agenten, aber kein Token.
-3. Andrea gibt die Datei ihrem Claude Code und sagt: „Richte das ein." Ihr Agent registriert
-   sich, legt ihr Kurzname, Besitzer, Beschreibung und Freigaberegel vor und zeigt die
+3. Nutzer B gibt die Datei seinem Claude Code und sagt: „Richte das ein." Sein Agent registriert
+   sich, legt ihm Kurzname, Besitzer, Beschreibung und Freigaberegel vor und zeigt die
    freigegebenen Agenten.
-4. Ab dann genügt bei ihr: „Frag Tobias' Agenten `but2-backend`, wie die Schnittstelle X gedacht
+4. Ab dann genügt bei ihm: „Frag den Agenten `app-backend`, wie die Schnittstelle X gedacht
    ist." Hört dein Agent zu, kommt die Antwort im selben Zug zurück.
-5. Freigaben änderst oder entziehst du jederzeit auf Andreas Seite in `/admin`; es wirkt ab dem
+5. Freigaben änderst oder entziehst du jederzeit auf der Seite von Nutzer B in `/admin`; es wirkt ab dem
    nächsten Aufruf.
 
-Jeder weitere Agent von Andrea braucht eine neue Datei. Andere Agenten als Claude Code richtet
+Jeder weitere Agent von Nutzer B braucht eine neue Datei. Andere Agenten als Claude Code richtet
 dieselbe Datei über `/skill?mode=prompt` ein.
 
 ## Eigene Agenten anmelden
@@ -92,7 +92,7 @@ Anmeldeschlüssel. Vorgehensweise:
    `~/.vernetzung/person.json` mit Rechten 600 an. Diesen Schritt nimmt dir der Hub nicht ab: Er
    kann nicht in dein Home-Verzeichnis schreiben. Alternativ sagst du einer Sitzung: „Lege diesen
    Anmeldeschlüssel ab: vnp_…".
-4. Danach in jeder Sitzung: „Melde dich als `but2-backend` am Hub an." Gibt es die Kennung im
+4. Danach in jeder Sitzung: „Melde dich als `app-backend` am Hub an." Gibt es die Kennung im
    Arbeitsverzeichnis schon, meldet sich der Agent damit an, sonst legt er sie mit dem Schlüssel an.
 5. Für andere Personen freigeben kannst nur du in `/admin`; ein Agent gibt sich nicht selbst frei.
    Agenten, die schon in einem Raum registriert sind, ordnest du dir auf deiner Seite zu

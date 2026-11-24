@@ -59,32 +59,32 @@ zeigte der Hub die Kennung als zuhörend, obwohl Claude Code die Ereignisse verw
 
 ## Von Hand prüfen
 
-Du brauchst zwei Kennungen, die einander erreichen, etwa `but2-backend` (deine, mit Kanal) und
-einen Agenten von Andrea, für die `but2-backend` freigegeben ist. Zum Testen genügt ein zweites
-Terminal mit `curl` als „Andrea".
+Du brauchst zwei Kennungen, die einander erreichen, etwa `app-backend` (deine, mit Kanal) und
+einen Agenten von Nutzer B, für den `app-backend` freigegeben ist. Zum Testen genügt ein zweites
+Terminal mit `curl` als „Nutzer B".
 
 1. **Start.** Claude Code wie oben starten. Die Startmeldung nennt
    `Channels (experimental) messages from server:vernetzung-kanal inject directly in this session`.
    `/mcp` zeigt `vernetzung-kanal` als verbunden.
    Zeigt die Startmeldung zusätzlich „no MCP server configured with that name", ist das bei
    `--mcp-config` ohne Folgen, solange `/mcp` den Server zeigt (beobachtet mit Claude Code 2.1.330).
-2. **Anwesenheit.** In `/admin` steht `but2-backend` auf „hört zu". Die Sitzung nicht anfassen.
-3. **Nachricht in die untätige Sitzung.** Im zweiten Terminal als Andrea fragen:
+2. **Anwesenheit.** In `/admin` steht `app-backend` auf „hört zu". Die Sitzung nicht anfassen.
+3. **Nachricht in die untätige Sitzung.** Im zweiten Terminal als Nutzer B fragen:
 
    ```bash
    curl -sS -m 150 -H "Authorization: Bearer $TOKEN" -H "X-Vernetzung-Session: $SES" \
      -H 'Content-Type: application/json' -X POST "https://hub.example.org/api/v1/ask" \
-     -d '{"to":["but2-backend"],"subject":"Probe","body":"Antworte bitte nur mit: angekommen","wait":120}'
+     -d '{"to":["app-backend"],"subject":"Probe","body":"Antworte bitte nur mit: angekommen","wait":120}'
    ```
 
    Erwartet: Binnen fünf Sekunden erscheint in der Claude-Code-Sitzung die Zeile
    `← vernetzung-kanal: Fremde Nachricht über den Vernetzung-Hub. …`, ohne dass du etwas eingibst,
    und Claude beginnt zu arbeiten.
-4. **Erstkontakt.** Steht Andreas `agent_id` nicht in `approved_contacts` der Kennung, fragt
+4. **Erstkontakt.** Steht die `agent_id` von Nutzer B nicht in `approved_contacts` der Kennung, fragt
    Claude dich, bevor es antwortet. Das ist richtig so.
 5. **Antwort im richtigen Gespräch.** Claude ruft `antworten` auf. Der `curl`-Aufruf aus Schritt 3
    kehrt mit `"status":"answered"` zurück; `reply.thread_id` ist gleich `thread_id`, `reply.from`
-   ist `but2-backend`. In `/admin` steht das Gespräch mit beiden Nachrichten.
+   ist `app-backend`. In `/admin` steht das Gespräch mit beiden Nachrichten.
 6. **Kein Permission Relay.** Lass Claude etwas tun, das eine Freigabe braucht. Die Abfrage
    erscheint nur im Terminal.
 7. **Ende.** Claude Code beenden. Nach kurzer Zeit zeigt `/admin` die Kennung nicht mehr als „hört zu".
