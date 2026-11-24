@@ -1,22 +1,30 @@
 # Protokoll Verbindungen – Version 1 (Entwurf)
 
-Stand: 20.11.2026. Die Seite des Hubs ist umgesetzt (`src/links.ts`, Tests in `test/links.test.ts`);
-die Installationen folgen.
+Stand: 24.11.2026. Die Seite des Hubs ist umgesetzt (`src/links.ts`, Tests in
+`test/links.test.ts`). Als Gegenstück gibt es bisher eine Umsetzung:
+[webterm](https://github.com/Etschmia/webterm), ein Terminal im Browser für Coding-Agenten
+(dort unter „Agenten verbinden"). Das Protokoll ist seit dem 20.11.2026 unverändert; „Entwurf"
+heißt, dass es sich noch ändern darf.
 
 Dieses Dokument ergänzt [PROTOKOLL.md](PROTOKOLL.md) um einen zweiten, davon getrennten
 Bereich des Hubs: **Verbindungen**. Eine Verbindung ist eine kleine Gruppe von Agenten-Sitzungen
-aus verschiedenen Webterminal-Installationen, die Ende-zu-Ende-verschlüsselt Nachrichten
-austauschen. Der Hub ist dabei nur Postfach: Er lagert Chiffrat, bis es abgeholt ist, und kann
-nichts davon lesen.
+aus verschiedenen Installationen, die Ende-zu-Ende-verschlüsselt Nachrichten austauschen. Der
+Hub ist dabei nur Postfach: Er lagert Chiffrat, bis es abgeholt ist, und kann nichts davon lesen.
 
-Räume, Agenten, Skill und MCP-Fassade aus PROTOKOLL.md bleiben unverändert. Zwischen beiden
-Bereichen gibt es keinen Übergang.
+Weil der Hub nichts entschlüsselt, braucht jede Seite ein Programm, das die Schlüssel hält, ver-
+und entschlüsselt und dem Agenten die Nachrichten weiterreicht. Dieses Programm heißt hier
+**Installation**. Das Protokoll setzt dafür kein bestimmtes Programm voraus; wer die Abschnitte
+2 bis 9 und 11 umsetzt, kann teilnehmen. Wo dieses Dokument und die Betreiber-GUI „Webterminal"
+sagen, ist die bisher einzige Umsetzung gemeint, webterm.
+
+Räume, Personen, Agenten, Skill und MCP-Fassade aus PROTOKOLL.md bleiben unverändert. Zwischen
+beiden Bereichen gibt es keinen Übergang.
 
 ## 1. Begriffe
 
 | Begriff | Bedeutung |
 |---|---|
-| **Installation** | Ein Webterminal-Backend. Es spricht mit dem Hub, nicht der Agent und nicht der Browser. |
+| **Installation** | Das Programm auf der Seite eines Nutzers, das Agenten-Sitzungen verwaltet und dieses Protokoll spricht – bisher das Backend eines Webterminals (webterm). Es spricht mit dem Hub, nicht der Agent und nicht der Browser. |
 | **Verbindung** | Gruppe von 2 bis 8 Mitgliedern mit gemeinsamem Schlüssel. Kennung `ln_…`. |
 | **Mitglied** | Eine Agenten-Sitzung einer Installation in einer Verbindung. Kennung `m_…`, eigenes Token `lmt_…`. |
 | **Zugangsschlüssel** | Vom Betreiber in `/admin` erzeugt (`vnk_…`). Berechtigt eine Installation, Verbindungen anzulegen. |
@@ -38,6 +46,9 @@ Bereichen gibt es keinen Übergang.
 
 - Der Hub speichert von Zugangsschlüsseln, Beitritts-Tokens und Mitglieds-Tokens nur Hashes.
 - Umschläge sind base64url ohne Auffüllung. Größenangaben meinen die dekodierten Bytes.
+- Fehlercodes, die bei jedem Aufruf vorkommen können: `token_missing` (401; die Kopfzeile fehlt),
+  `field_missing` und `field_invalid` (400; etwa ein Umschlag, der kein base64url ist, oder ein
+  `join_hash`, der kein SHA-256-Wert in Kleinbuchstaben-Hex ist).
 
 ### Grenzen
 
@@ -130,7 +141,8 @@ Fehlercodes: `link_full` (409), `member_unknown` (401).
 
 `GET /l/{id}` liefert für jede Kennung dieselbe statische Seite – ohne Nachschlagen, also auch
 ohne Auskunft, ob es die Verbindung gibt. Sie erklärt, dass die vollständige Adresse samt dem
-Teil hinter `#` im Webterminal einzufügen ist (Ketten-Symbol, „Beitreten“).
+Teil hinter `#` im Webterminal einzufügen ist (Ketten-Symbol, „Beitreten“). Der Text der Seite
+ist auf webterm zugeschnitten.
 
 - Kein Skript, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'`,
   `Referrer-Policy: no-referrer`, `Cache-Control: no-store`.
@@ -257,6 +269,7 @@ Antwort `200`, ein Ergebnis je Eintrag in derselben Reihenfolge:
   hatte, nennt das Ergebnis `"gap": { "from": 12, "to": 19 }`.
 - Für ein wartendes Mitglied besteht das Ergebnis nur aus `link_id`, `member_id` und `status`.
 - Je Eintrag kommen höchstens 100 Nachrichten; der Rest folgt nach der Bestätigung.
+- Mehr als 128 Einträge in `members` lehnt der Hub im Ganzen ab: `400 too_many_members`.
 - Fehler je Eintrag: `member_unknown` (Token unbekannt, Mitglied entfernt oder Verbindung
   gelöscht). Die übrigen Einträge bleiben davon unberührt.
 - Ein Eintrag mit `member_unknown` oder `status: "rejected"` beantwortet jede Abfrage sofort.
