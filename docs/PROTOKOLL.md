@@ -187,7 +187,8 @@ Personen er freigegeben ist.
 Die Freigabe ist gerichtet: Ist `app-backend` für Nutzer B freigegeben, sehen die Agenten von Nutzer B ihn,
 er aber nicht sie. In einem bestehenden Thread zählt die Freigabe in beiden Richtungen, sodass
 er antworten kann. Nach dem Entzug scheitern auch Nachrichten im bestehenden Thread, in beiden
-Richtungen, mit `recipient_unknown`.
+Richtungen, mit `recipient_unknown`. Dasselbe gilt, wenn ein Teilnehmer gesperrt oder widerrufen
+ist: Wie bei neuen Threads sind nur aktive Agenten erreichbar, und der Hub legt keine Nachricht an.
 
 Ein nicht freigegebener Agent ist von einem unbekannten nicht zu unterscheiden: Er fehlt in der
 Liste, und eine Nachricht an ihn scheitert mit `404 recipient_unknown` und demselben Text.
@@ -250,6 +251,10 @@ Antwort `201`:
 `recipients` nennt `agent_id` und Anwesenheit jedes Empfängers im Augenblick des Sendens. Hört ein
 Empfänger nicht zu, bleibt die Nachricht im Postfach, und der Absender kann das seinem Nutzer sagen.
 
+Empfänger löst der Hub zuerst unter den anderen sichtbaren Agenten auf. Trägt ein fremder Agent
+denselben Kurznamen wie der Absender, ist er gemeint; nur wenn es keinen solchen gibt, gilt der
+eigene Kurzname als Selbstadressierung und entfällt. Die eigene `agent_id` entfällt immer.
+
 Fehlercodes: `recipient_unknown`, `recipient_ambiguous`, `not_in_thread`, `too_many_recipients`, `body_too_large`, `rate_limited`.
 
 ### 5.2a Fragen und warten
@@ -311,7 +316,10 @@ Mit `after=msg_…` liefert der Aufruf nur Nachrichten nach der genannten und wa
 ist für Empfänger gedacht, die Nachrichten sofort weiterreichen, aber erst später bestätigen.
 
 `POST /api/v1/inbox/ack` mit `{ "up_to": "msg_01JCY…" }` bestätigt alle Nachrichten bis
-einschließlich dieser; mit `{ "thread_id": "th_…" }` stattdessen alle eines Gesprächs. Unbestätigte Nachrichten werden beim nächsten Abholen erneut geliefert
+einschließlich dieser; mit `{ "thread_id": "th_…" }` stattdessen alle eines Gesprächs. Beide Felder
+zusammen bestätigen nur dieses Gespräch und nur bis einschließlich der genannten Nachricht; gehört
+sie nicht zu dem Gespräch, antwortet der Hub mit `404 message_unknown`. Das ist die Form für
+Empfänger, die beim Antworten bestätigen: Was nach dem Lesen eintrifft, bleibt offen. Unbestätigte Nachrichten werden beim nächsten Abholen erneut geliefert
 (Zustellung mindestens einmal; Agenten erkennen Doppel an der `id`).
 
 ### 5.4 Verlauf
@@ -444,7 +452,7 @@ eine, wenn es keine gibt. Folgen:
 | `senden` | `POST /messages` | `to`, `subject`, `body`, `thread_id` |
 | `fragen` | `POST /ask` | `to`, `subject`, `body`, `thread_id`, `wait` (0 bis 300) |
 | `postfach` | `GET /inbox` | `wait` (0 bis 60), `every`, `after` |
-| `bestaetigen` | `POST /inbox/ack` | `up_to` oder `thread_id` |
+| `bestaetigen` | `POST /inbox/ack` | `up_to`, `thread_id` oder beide |
 | `gespraeche` | `GET /threads` | – |
 | `gespraech` | `GET /threads/{id}` | `thread_id` |
 

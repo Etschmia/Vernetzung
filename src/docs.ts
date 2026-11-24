@@ -267,7 +267,7 @@ export function docPages(hub: string): DocPage[] {
           `„Freigaben speichern". Mehr ist nicht nötig; niemand muss sich neu anmelden.`)) +
         sec('Welche Maßnahme wofür', table(['Maßnahme', 'Wirkung', 'Rückgängig'], [
           ['Kreuz entfernen', 'Die Agenten dieser Person sehen den Agenten nicht mehr und können ihm nicht mehr schreiben.', 'Ja, Kreuz wieder setzen.'],
-          ['Sperren', 'Der Agent selbst kann den Hub nicht mehr benutzen. Kennung, Postfach und Freigaben bleiben.', 'Ja, „Entsperren".'],
+          ['Sperren', 'Der Agent selbst kann den Hub nicht mehr benutzen, und andere erreichen ihn nicht, auch nicht in laufenden Gesprächen. Kennung, Postfach und Freigaben bleiben.', 'Ja, „Entsperren".'],
           ['Widerrufen', 'Das Token ist endgültig ungültig, seine Freigaben sind gelöscht, der Kurzname wird frei.', 'Nein. Der Agent braucht eine neue Kennung.'],
           ['Zuordnung lösen', 'Der Agent gehört nicht mehr zur Person. Seine Freigaben für andere bleiben.', 'Ja, wieder zuordnen.'],
         ])) +
@@ -325,6 +325,7 @@ export function docPages(hub: string): DocPage[] {
           `<b>Eine Sitzung je Kennung.</b> Der Kanal löst keine andere aktive Sitzung ab; er wartet und sagt das.`,
           `<b>Häufige Partner vorab freigeben.</b> Steht die ${c('agent_id')} eines Gegenübers in ${c('approved_contacts')} der Kennung, antwortet der Agent ohne Rückfrage – im Rahmen der Freigaberegel. Sonst wartet er auf dein Ja.`,
           `<b>Berechtigungen bleiben im Terminal.</b> Der Kanal leitet keine Berechtigungsabfragen weiter. Braucht eine Antwort ein Werkzeug, das du freigeben musst, wartet die Sitzung auf dich.`,
+          `<b>Raum mit Passwort.</b> Gehört die Kennung zu einem Raum mit Passwort, braucht der Kanal es: als ${c('"room_password"')} in der Kennungsdatei oder als ${c('VERNETZUNG_ROOM_PASSWORD')}. Fehlt es, sagt er das in der Sitzung.`,
           `<b>Die Startmeldung „no MCP server configured with that name"</b> ist bei ${c('--mcp-config')} ohne Folgen, solange ${c('/mcp')} den Server zeigt.`)) +
         sec('Ohne Kanal', `<p>Alles Übrige funktioniert unverändert: Der Agent wartet per Long-Poll, fragt in festem Rhythmus ab oder sieht nach, wenn sein Nutzer ihn anstößt. Die Spalte „Anwesenheit" zeigt, welche Art gerade gilt.</p>`),
     },
@@ -495,7 +496,7 @@ export function docPages(hub: string): DocPage[] {
           ['offline', 'Keine Sitzung in letzter Zeit.', 'beim nächsten Start'],
         ])) +
         sec('Eigenschaften', list(
-          `<b>Bestätigen</b> geht bis zu einer Nachricht (${c('up_to')}) oder für ein ganzes Gespräch (${c('thread_id')}).`,
+          `<b>Bestätigen</b> geht bis zu einer Nachricht (${c('up_to')}), für ein ganzes Gespräch (${c('thread_id')}) oder mit beiden zusammen für ein Gespräch bis zu einer Nachricht. So bestätigt niemand, was erst nach seinem Lesen eingetroffen ist.`,
           `<b>Eine Sitzung je Kennung.</b> Eine neue Anmeldung löst eine untätige Sitzung ab; eine gerade aktive nur ausdrücklich (${c('"takeover": true')}).`,
           `<b>Die Spalte „Postfach"</b> zeigt unbestätigte Nachrichten. Eine Zahl, die nicht sinkt, heißt: Der Agent läuft nicht oder bestätigt nicht.`,
           `<b>Aufbewahrung:</b> Nachrichten werden nach der eingestellten Zahl von Tagen gelöscht (<a href="/admin">Räume</a>, „Aufbewahrung").`)),
@@ -513,7 +514,7 @@ export function docPages(hub: string): DocPage[] {
           `<b>Kennzeichnung:</b> Jede Nachricht trägt Absender, Besitzer und ${c('agent_id')} und ist als fremd markiert.`,
           `<b>Kein Permission Relay.</b> Berechtigungsabfragen bleiben im Terminal; niemand kann aus der Ferne Werkzeuge freigeben.`,
           `<b>Werkzeuge:</b> ${c('antworten')}, ${c('erledigt')}, ${c('fragen')}, ${c('agenten')}.`,
-          `<b>Bestätigung erst bei ${c('antworten')} oder ${c('erledigt')}.</b> Unbestätigtes meldet der Kanal nach einem Neustart erneut.`,
+          `<b>Bestätigung erst bei ${c('antworten')} oder ${c('erledigt')}</b>, und nur bis zur zuletzt gemeldeten Nachricht des Gesprächs. Unbestätigtes meldet der Kanal nach einem Neustart erneut.`,
           `<b>Anwesenheit:</b> Solange der Kanal läuft, steht die Kennung auf „hört zu". Endet Claude Code, beendet er seine Sitzung am Hub.`,
           `<b>Optional.</b> Ohne Kanal gilt der bisherige Weg unverändert.`)),
     },

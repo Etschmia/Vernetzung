@@ -14,7 +14,16 @@ import { createHub } from '../src/hub.ts';
 
 const ADAPTER = fileURLToPath(new URL('../adapter/vernetzung-kanal.mjs', import.meta.url));
 const hub = createHub({ dbPath: ':memory:', adminPassword: 'geheim-geheim', log: () => {} });
-const server = createServer(hub.handler);
+// Vor einer Bestätigung lässt sich ein Schritt einschieben: so trifft Post genau zwischen Antwort und Bestätigung ein.
+let beforeAck: (() => Promise<unknown>) | null = null;
+const server = createServer(async (req, res) => {
+  if (beforeAck && req.url === '/api/v1/inbox/ack') {
+    const step = beforeAck;
+    beforeAck = null;
+    await step();
+  }
+  hub.handler(req, res);
+});
 let base = '';
 let cookie = '';
 const dir = mkdtempSync(joinPath(tmpdir(), 'vnz-kanal-'));
@@ -260,4 +269,89 @@ test('Ohne Kennung startet der Adapter trotzdem und erklärt den Fehler im Werkz
   assert.match(r.data.error.message, /Keine Kennung gefunden/);
   await lonely.stop();
   rmSync(empty, { recursive: true, force: true });
+});
+
+// Legt Arbeitsverzeichnis und Kennungsdatei für einen weiteren Adapter an.
+const workdir = (who: Who, extra: Record<string, unknown> = {}) => {
+  const d = mkdtempSync(joinPath(tmpdir(), 'vnz-kanal-'));
+  mkdirSync(joinPath(d, '.vernetzung', 'identities'), { recursive: true });
+  writeFileSync(joinPath(d, '.vernetzung', 'identities', `${who.name}.json`),
+    JSON.stringify({ hub: base, name: who.name, agent_id: who.id, token: who.token, ...extra }, null, 2), { mode: 0o600 });
+  return d;
+};
+const unackedBodies = (id: string) => hub.core.all<{ body: string }>(
+  'SELECT m.body FROM deliveries d JOIN messages m ON m.seq = d.message_seq WHERE d.agent_id = ? AND d.acked = 0 ORDER BY m.seq', id).map((r) => r.body);
+
+test('Antworten bestätigt nur Gesehenes: Post zwischen Antwort und Bestätigung bleibt offen und wird gemeldet', async () => {
+  const worker = await agentOf('nutzer-a', 'app-wettlauf', false);
+  await adminPost('/admin/person/nutzer-b/shares', [['agent', backend.id], ['agent', worker.id]]);
+  const d = workdir(worker);
+  const a = startAdapter(d);
+  await a.init();
+  const first = await call('POST', '/messages', nutzerB, { to: ['app-wettlauf'], body: 'Erste Frage' });
+  await a.event((m) => m.params?.meta?.message_id === first.json.message_id);
+  // Die zweite Nachricht trifft ein, nachdem die Antwort gesendet ist und bevor der Hub die Bestätigung verarbeitet.
+  let second: any;
+  beforeAck = async () => { second = await call('POST', '/messages', nutzerB, { thread_id: first.json.thread_id, body: 'Zweite Frage' }); };
+  const reply = await a.tool('antworten', { thread_id: first.json.thread_id, text: 'Antwort auf die erste.' });
+  assert.equal(reply.isError, false, JSON.stringify(reply.data));
+  assert.equal(reply.data.acked, 1);
+  assert.deepEqual(unackedBodies(worker.id), ['Zweite Frage']);
+  const e = await a.event((m) => m.params?.meta?.message_id === second.json.message_id);
+  assert.ok(e.params.content.includes('Zweite Frage'));
+
+  // Dasselbe für "erledigt"; und nach einem Neustart meldet der Kanal das Offene erneut.
+  let third: any;
+  beforeAck = async () => { third = await call('POST', '/messages', nutzerB, { thread_id: first.json.thread_id, body: 'Dritte Frage' }); };
+  assert.equal((await a.tool('erledigt', { thread_id: first.json.thread_id })).data.acked, 1);
+  assert.deepEqual(unackedBodies(worker.id), ['Dritte Frage']);
+  await a.stop();
+  const b = startAdapter(d);
+  await b.init();
+  await b.event((m) => m.params?.meta?.message_id === third.json.message_id);
+  assert.equal((await b.tool('erledigt', { thread_id: first.json.thread_id })).data.acked, 1);
+  // In einem Gespräch ohne gemeldete Nachricht gibt es nichts zu bestätigen.
+  assert.equal((await b.tool('erledigt', { thread_id: 'th_unbekannt' })).data.acked, 0);
+  await b.stop();
+  rmSync(d, { recursive: true, force: true });
+});
+
+test('Raum mit Passwort: Der Kanal nennt die Ursache und verbindet sich, sobald das Passwort in der Kennung steht', async () => {
+  await adminPost('/admin/rooms', { slug: 'tresor', title: 'Tresor' });
+  await adminPost('/admin/room/tresor/settings', { auth_level: 'open', pw_action: 'set', password: 'raumpasswort' });
+  const mk = async (name: string): Promise<Who> => {
+    const reg = await call('POST', '/register', undefined, { room: 'tresor', room_password: 'raumpasswort', name, owner: 'Test', description: 'd' });
+    assert.equal(reg.status, 201, JSON.stringify(reg.json));
+    return { token: reg.json.token, session: '', id: reg.json.agent_id, name };
+  };
+  const guard = await mk('waechter');
+  const peer = await mk('kollege');
+  peer.session = (await call('POST', '/session', peer, { room_password: 'raumpasswort' })).json.session;
+
+  const d = workdir(guard);
+  const a = startAdapter(d);
+  await a.init();
+  // Ohne Passwort: ein Hinweis in der Sitzung und ein Werkzeugfehler, der die Ursache nennt.
+  const notice = await a.event((m) => m.params?.meta?.fremd === 'nein');
+  assert.match(notice.params.content, /verlangt ein Passwort/);
+  assert.match(notice.params.content, /room_password/);
+  const failed = await a.tool('agenten');
+  assert.equal(failed.isError, true);
+  assert.equal(failed.data.error.code, 'kanal_passwort');
+  assert.match(failed.data.error.message, /room_password/);
+  assert.notEqual(await presence(peer, 'waechter'), 'listening');
+  // Der Nutzer trägt das Passwort nach; der Kanal verbindet sich ohne Neustart.
+  const file = joinPath(d, '.vernetzung', 'identities', 'waechter.json');
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), room_password: 'raumpasswort' }, null, 2), { mode: 0o600 });
+  assert.ok(await until(async () => (await presence(peer, 'waechter')) === 'listening'), a.stderr());
+  assert.equal((await a.tool('agenten')).isError, false);
+  await a.stop();
+
+  // Über die Umgebung geht es ebenso.
+  const d2 = workdir(guard);
+  const b = startAdapter(d2, { VERNETZUNG_ROOM_PASSWORD: 'raumpasswort' });
+  await b.init();
+  assert.ok(await until(async () => !(await b.tool('agenten')).isError), b.stderr());
+  await b.stop();
+  for (const x of [d, d2]) rmSync(x, { recursive: true, force: true });
 });

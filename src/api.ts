@@ -238,25 +238,31 @@ export function createApi(core: Core) {
         if (!members.some((m) => m.id === agent.id))
           throw new HttpError(403, 'not_in_thread', 'Diesen Thread gibt es nicht oder der Agent nimmt nicht daran teil.');
         recipients = members.filter((m) => m.id !== agent.id).map((m) => m.id);
-        // Ein Entzug der Freigabe wirkt auch in laufenden Gesprächen.
-        for (const id of recipients)
-          if (!connected(agent, one<Agent>('SELECT * FROM agents WHERE id = ?', id)!))
+        // Ein Entzug der Freigabe wirkt auch in laufenden Gesprächen, ebenso Sperre und Widerruf:
+        // Wie bei neuen Gesprächen sind nur aktive Agenten erreichbar.
+        for (const id of recipients) {
+          const r = one<Agent>('SELECT * FROM agents WHERE id = ?', id)!;
+          if (r.status !== 'active' || !connected(agent, r))
             throw new HttpError(404, 'recipient_unknown', 'Ein Teilnehmer dieses Gesprächs ist für dich nicht mehr erreichbar.');
+        }
       } else {
         const to = c.body.to;
         if (!Array.isArray(to) || to.length === 0)
           throw new HttpError(400, 'field_missing', 'Feld "to" fehlt: eine Liste mit mindestens einem Kurznamen.');
-        const names = [...new Set(to.map((n) => str(n, 'to', 64)))].filter((n) => n !== agent.name && n !== agent.id);
-        if (names.length === 0) throw new HttpError(400, 'field_invalid', 'Ein Agent kann nicht nur sich selbst schreiben.');
+        const names = [...new Set(to.map((n) => str(n, 'to', 64)))];
         const visible = visibleTo(agent).filter((v) => v.id !== agent.id);
         // Kurzname oder agent_id. Unbekannt und nicht freigegeben sind für den Absender dasselbe.
-        const found = names.map((n) => {
+        // Erst unter den anderen Agenten suchen: Ein fremder Agent darf denselben Kurznamen tragen wie
+        // der Absender. Nur was dort niemanden trifft und den Absender selbst meint, entfällt.
+        const found = names.flatMap((n) => {
           const hits = visible.filter((v) => (n.startsWith('ag_') ? v.id === n : v.name === n));
+          if (hits.length === 0 && (n === agent.id || n === agent.name)) return [];
           if (hits.length === 0) throw new HttpError(404, 'recipient_unknown', `Es gibt keinen erreichbaren Agenten "${n}".`);
           if (hits.length > 1)
             throw new HttpError(409, 'recipient_ambiguous', `Den Kurznamen "${n}" tragen mehrere erreichbare Agenten. Nimm stattdessen die agent_id aus der Agentenliste.`);
-          return hits[0];
+          return hits;
         });
+        if (found.length === 0) throw new HttpError(400, 'field_invalid', 'Ein Agent kann nicht nur sich selbst schreiben.');
         recipients = [...new Set(found.map((r) => r.id))];
         if (recipients.length + 1 > MAX_THREAD_MEMBERS)
           throw new HttpError(400, 'too_many_recipients', `Ein Thread hat höchstens ${MAX_THREAD_MEMBERS} Teilnehmer.`);
@@ -298,11 +304,12 @@ export function createApi(core: Core) {
        WHERE d.agent_id = ? AND d.acked = 0 AND m.thread_id = ? AND m.seq > ? ORDER BY m.seq LIMIT 1`, agent.id, sent.thread_id, sent.seq)[0];
 
     const deadline = Date.now() + wait * 1000;
-    const threads = core.asking.get(agent.id) ?? new Map<string, number>();
-    core.asking.set(agent.id, threads);
-    // Fragt dieselbe Kennung im selben Gespräch mehrfach zugleich, zählt die früheste Frage.
-    const outer = threads.get(sent.thread_id);
-    threads.set(sent.thread_id, Math.min(outer ?? sent.seq, sent.seq));
+    // Jede wartende Frage steht für sich. Fragt dieselbe Kennung im selben Gespräch mehrfach
+    // zugleich, zählt für das Postfach die früheste noch offene.
+    const mine = { thread_id: sent.thread_id, seq: sent.seq };
+    const open = core.asking.get(agent.id) ?? new Set();
+    core.asking.set(agent.id, open);
+    open.add(mine);
     try {
       for (;;) {
         const reply = firstReply();
@@ -332,9 +339,8 @@ export function createApi(core: Core) {
         if (reason === 'recheck') authenticate(c.req); // gesperrt, widerrufen oder abgelöst: der passende Fehler
       }
     } finally {
-      if (outer == null) threads.delete(sent.thread_id);
-      else threads.set(sent.thread_id, outer);
-      if (threads.size === 0) core.asking.delete(agent.id);
+      open.delete(mine);
+      if (open.size === 0 && core.asking.get(agent.id) === open) core.asking.delete(agent.id);
     }
     // Keine Antwort in der Wartezeit: Sie kommt später ins Postfach. Die Anwesenheit sagt, womit zu rechnen ist.
     return [200, {
@@ -345,11 +351,12 @@ export function createApi(core: Core) {
 
   // Antworten, auf die gerade ein "Fragen und warten" derselben Kennung wartet, bleiben dem Postfach fern.
   const unacked = (agentId: string, after = 0) => {
-    const held = core.asking.get(agentId);
+    const held = new Map<string, number>();
+    for (const q of core.asking.get(agentId) ?? []) held.set(q.thread_id, Math.min(held.get(q.thread_id) ?? q.seq, q.seq));
     const rows = all<MsgRow & { seq: number }>(
       `${MSG_SELECT.replace('SELECT ', 'SELECT m.seq, ')} JOIN deliveries d ON d.message_seq = m.seq
        WHERE d.agent_id = ? AND d.acked = 0 AND m.seq > ? ORDER BY m.seq LIMIT 100`, agentId, after);
-    return shapeMessages(held ? rows.filter((r) => !(held.has(r.thread_id) && r.seq > held.get(r.thread_id)!)) : rows);
+    return shapeMessages(rows.filter((r) => !(held.has(r.thread_id) && r.seq > held.get(r.thread_id)!)));
   };
 
   const inbox = async (c: Ctx) => {
@@ -396,18 +403,26 @@ export function createApi(core: Core) {
 
   const ack = (c: Ctx) => {
     const agent = authenticate(c.req);
-    // Mit thread_id: alle Nachrichten dieses einen Gesprächs, unabhängig von der Reihenfolge im Postfach.
-    if (c.body.thread_id != null && c.body.up_to == null) {
+    const threadId = c.body.thread_id == null ? null : str(c.body.thread_id, 'thread_id', 64);
+    // Nur thread_id: alle Nachrichten dieses einen Gesprächs, unabhängig von der Reihenfolge im Postfach.
+    if (threadId != null && c.body.up_to == null) {
       const acked = run(
         `UPDATE deliveries SET acked = 1 WHERE agent_id = ? AND acked = 0
-         AND message_seq IN (SELECT seq FROM messages WHERE thread_id = ?)`, agent.id, str(c.body.thread_id, 'thread_id', 64));
+         AND message_seq IN (SELECT seq FROM messages WHERE thread_id = ?)`, agent.id, threadId);
       return [200, { acked, unread: unreadCount(agent.id) }] as const;
     }
     const upTo = str(c.body.up_to, 'up_to', 64);
-    const row = one<{ seq: number }>(
-      'SELECT m.seq FROM messages m JOIN deliveries d ON d.message_seq = m.seq WHERE m.id = ? AND d.agent_id = ?', upTo, agent.id);
-    if (!row) throw new HttpError(404, 'message_unknown', 'Diese Nachricht liegt nicht im Postfach des Agenten.');
-    const acked = run('UPDATE deliveries SET acked = 1 WHERE agent_id = ? AND acked = 0 AND message_seq <= ?', agent.id, row.seq);
+    const row = one<{ seq: number; thread_id: string }>(
+      'SELECT m.seq, m.thread_id FROM messages m JOIN deliveries d ON d.message_seq = m.seq WHERE m.id = ? AND d.agent_id = ?', upTo, agent.id);
+    if (!row || (threadId != null && row.thread_id !== threadId))
+      throw new HttpError(404, 'message_unknown', threadId != null && row
+        ? 'Diese Nachricht gehört nicht zu dem genannten Gespräch.' : 'Diese Nachricht liegt nicht im Postfach des Agenten.');
+    // thread_id und up_to zusammen: nur dieses Gespräch und nur bis zur genannten Nachricht. So bestätigt
+    // ein Empfänger nichts, was erst nach seinem Lesen eingetroffen ist.
+    const acked = threadId != null
+      ? run(`UPDATE deliveries SET acked = 1 WHERE agent_id = ? AND acked = 0 AND message_seq <= ?
+             AND message_seq IN (SELECT seq FROM messages WHERE thread_id = ?)`, agent.id, row.seq, threadId)
+      : run('UPDATE deliveries SET acked = 1 WHERE agent_id = ? AND acked = 0 AND message_seq <= ?', agent.id, row.seq);
     return [200, { acked, unread: unreadCount(agent.id) }] as const;
   };
 

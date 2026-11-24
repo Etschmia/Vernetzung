@@ -221,7 +221,7 @@ export function createCore(cfg: Config) {
   // Wartende "Fragen und warten"-Aufrufe je Agent. Sie zählen nicht als Zuhören. Solange einer wartet,
   // hält das Postfach die Antworten in seinem Gespräch zurück (Thread → Nachrichtenfolge der Frage).
   const askers = new Map<string, Set<(reason: string) => void>>();
-  const asking = new Map<string, Map<string, number>>();
+  const asking = new Map<string, Set<{ thread_id: string; seq: number }>>();
   const wake = (agentId: string, reason: string) => {
     for (const done of [...(waiters.get(agentId) ?? []), ...(askers.get(agentId) ?? [])]) done(reason);
   };

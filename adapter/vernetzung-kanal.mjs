@@ -8,6 +8,7 @@
 //
 // Kennung:  VERNETZUNG_IDENTITY=<Pfad zur Kennungsdatei>, sonst die einzige Datei in
 //           .vernetzung/identities/ des Arbeitsverzeichnisses.
+// Raum mit Passwort: "room_password" in der Kennungsdatei oder VERNETZUNG_ROOM_PASSWORD.
 // Start:    claude --mcp-config <Datei mit diesem Server> \
 //             --dangerously-load-development-channels server:vernetzung-kanal
 //
@@ -17,7 +18,7 @@ import { readFileSync, readdirSync, writeFileSync, rmSync, chmodSync } from 'nod
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 const POLL_WAIT = Number(process.env.VERNETZUNG_POLL_WAIT ?? 50); // Sekunden je Long-Poll
 const RETRY_MS = Number(process.env.VERNETZUNG_RETRY_MS ?? 30_000);
@@ -45,7 +46,7 @@ function loadIdentity() {
   for (const key of ['hub', 'name', 'token'])
     if (typeof id[key] !== 'string' || !id[key]) throw new Error(`In der Kennung ${path} fehlt "${key}".`);
   return {
-    hub: id.hub.replace(/\/+$/, ''), name: id.name, token: id.token, agentId: id.agent_id ?? '',
+    path, hub: id.hub.replace(/\/+$/, ''), name: id.name, token: id.token, agentId: id.agent_id ?? '',
     // Die Sitzung liegt neben dem Ordner identities/, wie der Skill es für Shell-Aufrufe vorsieht.
     sessionFile: join(dirname(dirname(path)), `session-${id.name}.json`),
   };
@@ -62,7 +63,7 @@ try {
 
 // ---- Hub ----
 
-// state: start | verbunden | wartet (Kennung anderswo aktiv) | abgeloest | gesperrt | fehler
+// state: start | verbunden | wartet (Kennung anderswo aktiv) | abgeloest | gesperrt | passwort | fehler
 let state = startError ? 'fehler' : 'start';
 let stateNote = startError;
 let session = '';
@@ -98,6 +99,18 @@ async function hub(method, path, body, { withSession = true, signal, timeout = 3
   return json;
 }
 
+// Das Raumpasswort wird bei jedem Verbindungsversuch neu gelesen: Der Nutzer kann es nachtragen,
+// ohne Claude Code neu zu starten.
+const roomPassword = () => {
+  if (process.env.VERNETZUNG_ROOM_PASSWORD) return process.env.VERNETZUNG_ROOM_PASSWORD;
+  try {
+    const pw = JSON.parse(readFileSync(identity.path, 'utf8')).room_password;
+    return typeof pw === 'string' && pw ? pw : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 const readSessionFile = () => {
   try {
     const s = JSON.parse(readFileSync(identity.sessionFile, 'utf8')).session;
@@ -120,7 +133,8 @@ async function connect() {
       if (!(err instanceof HubError) || !['session_replaced', 'session_required'].includes(err.code)) throw err;
     }
   }
-  const started = await hub('POST', '/session', {}, { withSession: false });
+  const password = roomPassword();
+  const started = await hub('POST', '/session', password ? { room_password: password } : {}, { withSession: false });
   session = started.session;
   ownSession = true;
   writeFileSync(identity.sessionFile, `${JSON.stringify({ session }, null, 2)}\n`, { mode: 0o600 });
@@ -166,6 +180,10 @@ const pushNotice = (text) => notify(`Hinweis des Vernetzung-Kanals (kein fremder
 
 // ---- Empfangsschleife ----
 
+// Je Gespräch die letzte Nachricht, die in die Sitzung gegeben wurde. Bestätigt wird nur bis dorthin:
+// Was danach eintrifft, hat der Agent noch nicht gesehen.
+const lastShown = new Map();
+
 async function listen() {
   let after = '';
   let noticed = '';
@@ -185,6 +203,7 @@ async function listen() {
       const { messages } = await hub('GET', query, undefined, { signal: pollAbort.signal, timeout: (POLL_WAIT + 20) * 1000 });
       for (const m of messages) {
         pushMessage(m);
+        lastShown.set(m.thread_id, m.id);
         after = m.id;
       }
     } catch (err) {
@@ -207,10 +226,18 @@ async function listen() {
         setState('gesperrt', err.message);
         noticeOnce(err.code, `Der Hub lehnt die Kennung ${identity.name} ab (${err.code}): ${err.message} Sag das deinem Nutzer und umgehe es nicht.`);
         await sleep(RETRY_MS);
+      } else if (err instanceof HubError && err.code === 'room_password_wrong') {
+        const how = `Trag es als "room_password" in die Kennungsdatei ${identity.path} ein oder setze VERNETZUNG_ROOM_PASSWORD; der Kanal versucht es alle ${Math.round(RETRY_MS / 1000)} Sekunden erneut.`;
+        setState('passwort', `Der Raum dieser Kennung verlangt ein Passwort. ${how}`);
+        noticeOnce('passwort', `Der Raum der Kennung ${identity.name} verlangt ein Passwort, und dem Kanal fehlt es oder es ist falsch. Bis dahin kommt hier keine Post an. Frag deinen Nutzer nach dem Raumpasswort. ${how}`);
+        await sleep(RETRY_MS);
       } else if (err instanceof HubError && err.code === 'message_unknown') {
         after = ''; // Die Nachricht wurde inzwischen gelöscht (Aufbewahrungsfrist).
       } else {
-        if (state === 'verbunden') log(`Hub nicht erreichbar: ${err.message}`);
+        // Auch beim Verbindungsaufbau sichtbar machen, woran es liegt – je Ursache einmal.
+        const why = err instanceof HubError ? `Der Hub antwortet mit ${err.code}: ${err.message}` : `Hub nicht erreichbar: ${err.message}`;
+        if (state === 'verbunden' || stateNote !== why) log(why);
+        if (state !== 'verbunden') stateNote = why;
         await sleep(Math.min(RETRY_MS, 10_000));
       }
     }
@@ -257,21 +284,34 @@ const TOOLS = [
   },
 ];
 
+// Bestätigt in einem Gespräch nur bis zu der Nachricht, die in die Sitzung gegeben wurde.
+async function ackShown(threadId, upTo) {
+  if (!upTo) return { acked: 0, hinweis: 'In diesem Gespräch hat der Kanal seit seinem Start keine Nachricht gemeldet; es gab nichts zu bestätigen.' };
+  try {
+    return await hub('POST', '/inbox/ack', { thread_id: threadId, up_to: upTo });
+  } catch (err) {
+    // Die Nachricht wurde inzwischen gelöscht (Aufbewahrungsfrist): Dann ist nichts mehr offen.
+    if (err instanceof HubError && err.code === 'message_unknown') return { acked: 0 };
+    throw err;
+  }
+}
+
 async function callTool(name, args) {
   if (state !== 'verbunden') {
     const why = {
-      start: 'Der Kanal verbindet sich noch mit dem Hub. Versuch es gleich noch einmal.',
+      start: `Der Kanal verbindet sich noch mit dem Hub. Versuch es gleich noch einmal.${stateNote ? ` Letzter Fehler: ${stateNote}` : ''}`,
       wartet: 'Die Kennung ist in einer anderen Sitzung aktiv; der Kanal wartet, statt sie abzulösen.',
       abgeloest: 'Eine andere Sitzung hat die Kennung übernommen.',
     }[state] ?? stateNote;
     throw new HubError(0, `kanal_${state}`, why);
   }
   if (name === 'antworten') {
+    // Vor dem Senden festhalten, was der Agent gesehen hat: Was währenddessen eintrifft, bleibt unbestätigt.
+    const upTo = lastShown.get(args.thread_id);
     const sent = await hub('POST', '/messages', { thread_id: args.thread_id, body: args.text });
-    const { acked } = await hub('POST', '/inbox/ack', { thread_id: args.thread_id });
-    return { ...sent, acked };
+    return { ...sent, acked: (await ackShown(args.thread_id, upTo)).acked };
   }
-  if (name === 'erledigt') return hub('POST', '/inbox/ack', { thread_id: args.thread_id });
+  if (name === 'erledigt') return ackShown(args.thread_id, lastShown.get(args.thread_id));
   if (name === 'fragen') {
     const wait = Math.min(300, Math.max(0, Number(args.wait ?? 60) || 0));
     return hub('POST', '/ask', { ...args, wait }, { timeout: (wait + 30) * 1000 });

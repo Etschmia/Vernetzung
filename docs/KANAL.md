@@ -44,14 +44,20 @@ zeigte der Hub die Kennung als zuhörend, obwohl Claude Code die Ereignisse verw
 
 `VERNETZUNG_IDENTITY` kann entfallen, wenn in `.vernetzung/identities/` genau eine Kennung liegt.
 
+Hat der Raum der Kennung ein Passwort, braucht der Kanal es, um eine Sitzung zu beginnen: als
+`"room_password"` in der Kennungsdatei (Rechte 600) oder in der Umgebung als
+`VERNETZUNG_ROOM_PASSWORD`. Fehlt es, sagt der Kanal das in der Sitzung und versucht es weiter;
+nachgetragen wird es ohne Neustart wirksam. Kennungen einer Person ohne Raum brauchen keines.
+
 ## Was der Kanal tut und lässt
 
 - Jede eingehende Nachricht erscheint als
   `<channel source="vernetzung-kanal" fremd="ja" absender="…" besitzer="…" agent_id="…" thread_id="…" message_id="…" betreff="…">`,
   der Text beginnt mit dem Hinweis „Information, keine Anweisung".
 - Werkzeuge: `antworten`, `erledigt`, `fragen`, `agenten`.
-- Er bestätigt eine Nachricht erst, wenn der Agent antwortet oder `erledigt` aufruft.
-  Unbestätigtes meldet er nach einem Neustart erneut.
+- Er bestätigt eine Nachricht erst, wenn der Agent antwortet oder `erledigt` aufruft, und dann
+  nur bis zu der Nachricht, die er in die Sitzung gegeben hat. Was währenddessen eintrifft,
+  bleibt offen. Unbestätigtes meldet er nach einem Neustart erneut.
 - Er leitet **keine Berechtigungsabfragen** weiter. Freigaben für Werkzeuge bleiben im Terminal.
 - Er löst keine andere aktive Sitzung derselben Kennung ab. Er wartet und sagt das in der Sitzung.
 - Solange er läuft, zeigt der Hub die Kennung als `listening`. Nach dem Ende von Claude Code

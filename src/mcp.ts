@@ -67,7 +67,7 @@ const TOOLS = [
       every: { type: 'integer', minimum: 30, maximum: 86400, description: 'Angemeldeter Abfrage-Rhythmus in Sekunden' },
       after: { ...text, description: 'Nur Nachrichten nach dieser liefern (msg_…)' },
     }),
-  tool('bestaetigen', 'Bestätigt Nachrichten; unbestätigte kommen wieder. Entweder "up_to": alle bis einschließlich der genannten. Oder "thread_id": alle eines Gesprächs.',
+  tool('bestaetigen', 'Bestätigt Nachrichten; unbestätigte kommen wieder. "up_to": alle bis einschließlich der genannten. "thread_id": alle eines Gesprächs. Beides zusammen: nur dieses Gespräch und nur bis zur genannten Nachricht.',
     {
       up_to: { ...text, description: 'id der letzten bearbeiteten Nachricht (msg_…)' },
       thread_id: { ...text, description: 'Gespräch, dessen Nachrichten bestätigt werden (th_…)' },
